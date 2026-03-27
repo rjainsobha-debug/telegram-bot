@@ -6,17 +6,17 @@ app.use(express.json());
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-// IMPORTANT: use Railway port
+// VERY IMPORTANT FOR RAILWAY
 const PORT = process.env.PORT || 3000;
 
-// health check
+// ROOT ROUTE (so browser works)
 app.get("/", (req, res) => {
-  res.send("Bot is running");
+  res.send("Bot is running ✅");
 });
 
-// webhook
+// WEBHOOK
 app.post("/webhook", async (req, res) => {
-  console.log("Webhook hit"); // 👈 IMPORTANT LOG
+  console.log("Webhook hit");
 
   try {
     const message = req.body.message;
@@ -43,11 +43,12 @@ app.post("/webhook", async (req, res) => {
 
     res.send("ok");
   } catch (err) {
-    console.error(err);
-    res.send("error");
+    console.error("Error:", err);
+    res.status(500).send("error");
   }
 });
 
-app.listen(PORT, () => {
+// START SERVER (IMPORTANT)
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
