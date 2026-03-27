@@ -6,30 +6,48 @@ app.use(express.json());
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-app.post("/webhook", async (req, res) => {
-  const message = req.body.message;
+// IMPORTANT: use Railway port
+const PORT = process.env.PORT || 3000;
 
-  if (!message) return res.send("ok");
-
-  const chatId = message.chat.id;
-  const text = message.text;
-
-  let reply = "Command received";
-
-  if (text === "/start") {
-    reply = "Welcome to WealthNest 📊";
-  }
-
-  await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: reply
-    })
-  });
-
-  res.send("ok");
+// health check
+app.get("/", (req, res) => {
+  res.send("Bot is running");
 });
 
-app.listen(3000, () => console.log("Running"));
+// webhook
+app.post("/webhook", async (req, res) => {
+  console.log("Webhook hit"); // 👈 IMPORTANT LOG
+
+  try {
+    const message = req.body.message;
+
+    if (!message) return res.send("ok");
+
+    const chatId = message.chat.id;
+    const text = message.text;
+
+    let reply = `You said: ${text}`;
+
+    if (text === "/start") {
+      reply = "Welcome to WealthNest 📊";
+    }
+
+    await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: reply
+      })
+    });
+
+    res.send("ok");
+  } catch (err) {
+    console.error(err);
+    res.send("error");
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
