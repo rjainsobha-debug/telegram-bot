@@ -10,17 +10,10 @@ const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-if (!TOKEN) {
-  console.error("Missing TELEGRAM_BOT_TOKEN");
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 }
-if (!SUPABASE_URL) {
-  console.error("Missing SUPABASE_URL");
-}
-if (!SUPABASE_ANON_KEY) {
-  console.error("Missing SUPABASE_ANON_KEY");
-}
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 app.get("/", (req, res) => {
   res.send("Bot is running ✅");
@@ -78,110 +71,118 @@ app.post("/webhook", async (req, res) => {
         }
       }
     } else if (text.startsWith("/add")) {
-      const body = rawText.replace("/add", "").trim();
-
-      if (!body.includes("|")) {
-        reply = "Invalid format.\nUse:\n/add fund name | amount\nExample:\n/add hdfc flexi cap | 50000";
+      if (!supabase) {
+        reply = "Database is not configured yet.";
       } else {
-        const [fundNameRaw, amountRaw] = body.split("|");
-        const fundName = (fundNameRaw || "").trim();
-        const amount = parseFloat((amountRaw || "").trim());
+        const body = rawText.replace("/add", "").trim();
 
-        if (!fundName || Number.isNaN(amount) || amount <= 0) {
-          reply = "Please enter valid fund name and amount.\nExample:\n/add hdfc flexi cap | 50000";
+        if (!body.includes("|")) {
+          reply = "Invalid format.\nUse:\n/add fund name | amount\nExample:\n/add hdfc flexi cap | 50000";
         } else {
-          try {
-            const fund = await findFund(fundName);
+          const [fundNameRaw, amountRaw] = body.split("|");
+          const fundName = (fundNameRaw || "").trim();
+          const amount = parseFloat((amountRaw || "").trim());
 
-            if (!fund) {
-              reply = "Fund not found.";
-            } else {
-              const navData = await getFundDetails(fund.schemeCode);
-              const latest = navData.data?.[0];
+          if (!fundName || Number.isNaN(amount) || amount <= 0) {
+            reply = "Please enter valid fund name and amount.\nExample:\n/add hdfc flexi cap | 50000";
+          } else {
+            try {
+              const fund = await findFund(fundName);
 
-              if (!latest) {
-                reply = "NAV data not available.";
+              if (!fund) {
+                reply = "Fund not found.";
               } else {
-                const nav = parseFloat(latest.nav);
-                const units = amount / nav;
+                const navData = await getFundDetails(fund.schemeCode);
+                const latest = navData.data?.[0];
 
-                const { error } = await supabase.from("portfolios").insert([
-                  {
-                    chat_id: chatId,
-                    scheme_name: navData.meta.scheme_name,
-                    scheme_code: String(fund.schemeCode),
-                    invested_amount: amount,
-                    units
-                  }
-                ]);
-
-                if (error) {
-                  console.error("Supabase insert error:", error);
-                  reply = "Error saving portfolio.";
+                if (!latest) {
+                  reply = "NAV data not available.";
                 } else {
-                  reply = `✅ Added to portfolio\n\nFund: ${navData.meta.scheme_name}\nInvested: ₹${amount.toFixed(2)}\nNAV: ₹${nav.toFixed(2)}\nUnits: ${units.toFixed(4)}`;
+                  const nav = parseFloat(latest.nav);
+                  const units = amount / nav;
+
+                  const { error } = await supabase.from("portfolios").insert([
+                    {
+                      chat_id: chatId,
+                      scheme_name: navData.meta.scheme_name,
+                      scheme_code: String(fund.schemeCode),
+                      invested_amount: amount,
+                      units
+                    }
+                  ]);
+
+                  if (error) {
+                    console.error("Supabase insert error:", error);
+                    reply = "Error saving portfolio.";
+                  } else {
+                    reply = `✅ Added to portfolio\n\nFund: ${navData.meta.scheme_name}\nInvested: ₹${amount.toFixed(2)}\nNAV: ₹${nav.toFixed(2)}\nUnits: ${units.toFixed(4)}`;
+                  }
                 }
               }
+            } catch (err) {
+              console.error("Add error:", err);
+              reply = "Error adding fund.";
             }
-          } catch (err) {
-            console.error("Add error:", err);
-            reply = "Error adding fund.";
           }
         }
       }
     } else if (text === "/portfolio") {
-      try {
-        const { data: userPortfolio, error } = await supabase
-          .from("portfolios")
-          .select("*")
-          .eq("chat_id", chatId)
-          .order("created_at", { ascending: true });
+      if (!supabase) {
+        reply = "Database is not configured yet.";
+      } else {
+        try {
+          const { data: userPortfolio, error } = await supabase
+            .from("portfolios")
+            .select("*")
+            .eq("chat_id", chatId)
+            .order("created_at", { ascending: true });
 
-        if (error) {
-          console.error("Supabase fetch error:", error);
-          reply = "Error fetching portfolio.";
-        } else if (!userPortfolio || userPortfolio.length === 0) {
-          reply = "Your portfolio is empty.\nUse:\n/add fund name | amount";
-        } else {
-          let totalInvested = 0;
-          let totalCurrentValue = 0;
-          const lines = ["📁 Your Portfolio\n"];
+          if (error) {
+            console.error("Supabase fetch error:", error);
+            reply = "Error fetching portfolio.";
+          } else if (!userPortfolio || userPortfolio.length === 0) {
+            reply = "Your portfolio is empty.\nUse:\n/add fund name | amount";
+          } else {
+            let totalInvested = 0;
+            let totalCurrentValue = 0;
+            const lines = ["📁 Your Portfolio\n"];
 
-          for (const item of userPortfolio) {
-            const navData = await getFundDetails(item.scheme_code);
-            const latest = navData.data?.[0];
-            if (!latest) continue;
+            for (const item of userPortfolio) {
+              const navData = await getFundDetails(item.scheme_code);
+              const latest = navData.data?.[0];
+              if (!latest) continue;
 
-            const currentNav = parseFloat(latest.nav);
-            const currentValue = Number(item.units) * currentNav;
-            const gain = currentValue - Number(item.invested_amount);
+              const currentNav = parseFloat(latest.nav);
+              const currentValue = Number(item.units) * currentNav;
+              const gain = currentValue - Number(item.invested_amount);
 
-            totalInvested += Number(item.invested_amount);
-            totalCurrentValue += currentValue;
+              totalInvested += Number(item.invested_amount);
+              totalCurrentValue += currentValue;
 
-            lines.push(
-              `${item.scheme_name}
+              lines.push(
+                `${item.scheme_name}
 Invested: ₹${Number(item.invested_amount).toFixed(2)}
 Current: ₹${currentValue.toFixed(2)}
 Gain/Loss: ₹${gain.toFixed(2)}
 `
-            );
-          }
+              );
+            }
 
-          const totalGain = totalCurrentValue - totalInvested;
+            const totalGain = totalCurrentValue - totalInvested;
 
-          lines.push(
-            `--------------------
+            lines.push(
+              `--------------------
 Total Invested: ₹${totalInvested.toFixed(2)}
 Current Value: ₹${totalCurrentValue.toFixed(2)}
 Total Gain/Loss: ₹${totalGain.toFixed(2)}`
-          );
+            );
 
-          reply = lines.join("\n");
+            reply = lines.join("\n");
+          }
+        } catch (err) {
+          console.error("Portfolio error:", err);
+          reply = "Error fetching portfolio.";
         }
-      } catch (err) {
-        console.error("Portfolio error:", err);
-        reply = "Error fetching portfolio.";
       }
     } else {
       reply = "Unknown command.\nType /help";
