@@ -24,16 +24,11 @@ app.post("/webhook", async (req, res) => {
     if (!message) return res.status(200).send("ok");
 
     const chatId = String(message.chat.id);
-    const rawText = (message.text || "").trim();
-    const text = rawText.toLowerCase();
+    const text = (message.text || "").trim().toLowerCase();
 
-    let reply = "Unknown command.\nType /start";
-
-    if (text === "/start") {
-      reply = "Welcome to WealthNest 📊";
-    } else if (text === "/ping") {
-      reply = "Bot is live ✅";
-    }
+    let reply = "Unknown command.";
+    if (text === "/start") reply = "Welcome to WealthNest 📊";
+    if (text === "/ping") reply = "Bot is live ✅";
 
     await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
       method: "POST",
