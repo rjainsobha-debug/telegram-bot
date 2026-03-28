@@ -10,16 +10,25 @@ const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-// SAFE INIT
+// 🔍 DEBUG
+console.log("SUPABASE_URL exists:", !!SUPABASE_URL);
+console.log("SUPABASE_ANON_KEY exists:", !!SUPABASE_ANON_KEY);
+
 let supabase = null;
+
 if (SUPABASE_URL && SUPABASE_ANON_KEY) {
   supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  console.log("Supabase client created ✅");
+} else {
+  console.log("Supabase client NOT created ❌");
 }
 
+// ROOT
 app.get("/", (req, res) => {
   res.send("Bot is running ✅");
 });
 
+// HEALTH CHECK
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -28,6 +37,7 @@ app.get("/health", (req, res) => {
   });
 });
 
+// WEBHOOK
 app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.message;
@@ -70,7 +80,7 @@ Date: ${latest.date}`;
     // ADD
     } else if (text.startsWith("/add")) {
       if (!supabase) {
-        reply = "Database not connected.";
+        reply = "Database is not connected ❌";
       } else {
         const body = rawText.replace("/add", "").trim();
 
@@ -103,7 +113,8 @@ Date: ${latest.date}`;
             ]);
 
             if (error) {
-              reply = "Error saving data";
+              console.error(error);
+              reply = "Error saving data ❌";
             } else {
               reply = `✅ Added\n₹${amount} invested`;
             }
@@ -114,7 +125,7 @@ Date: ${latest.date}`;
     // PORTFOLIO
     } else if (text === "/portfolio") {
       if (!supabase) {
-        reply = "Database not connected.";
+        reply = "Database is not connected ❌";
       } else {
         const { data, error } = await supabase
           .from("portfolios")
@@ -152,9 +163,10 @@ Date: ${latest.date}`;
       }
     }
 
+    // SEND MESSAGE
     await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
         text: reply
@@ -181,6 +193,7 @@ async function getFund(code) {
   return r.json();
 }
 
+// START SERVER
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("Server running");
+  console.log("Server running 🚀");
 });
