@@ -1,7 +1,7 @@
 {
   "name": "telegram-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "index.cjs",
   "type": "module",
   "dependencies": {
     "@supabase/supabase-js": "^2.49.8",
@@ -9,6 +9,6 @@
     "node-fetch": "^3.3.2"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.cjs"
   }
 }
