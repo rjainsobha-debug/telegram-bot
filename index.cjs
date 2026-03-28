@@ -8,6 +8,7 @@ const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const CRON_SECRET = process.env.CRON_SECRET || "mysecret123";
 
 if (!TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN");
@@ -24,10 +25,9 @@ if (!SUPABASE_ANON_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// Existing holdings table
 const HOLDINGS_TABLE = "portfolios";
-// New SIP table
 const SIPS_TABLE = "mf_sips";
+const USERS_TABLE = "bot_users";
 
 app.get("/", (req, res) => {
   res.send("Bot is running ✅");
@@ -81,9 +81,50 @@ async function sendTelegramMessage(chatId, text) {
 
     const data = await response.json();
     console.log("Telegram response:", data);
+    return data;
   } catch (err) {
     console.error("Telegram send error:", err);
+    return null;
   }
+}
+
+async function registerUser(chatId) {
+  try {
+    const { data: existing, error: fetchError } = await supabase
+      .from(USERS_TABLE)
+      .select("*")
+      .eq("chat_id", String(chatId))
+      .limit(1);
+
+    if (fetchError) {
+      console.error("User fetch error:", fetchError);
+      return;
+    }
+
+    if (existing && existing.length > 0) return;
+
+    const { error: insertError } = await supabase.from(USERS_TABLE).insert([
+      {
+        chat_id: String(chatId)
+      }
+    ]);
+
+    if (insertError) {
+      console.error("User register error:", insertError);
+    }
+  } catch (err) {
+    console.error("registerUser error:", err);
+  }
+}
+
+async function getAllUsers() {
+  const { data, error } = await supabase
+    .from(USERS_TABLE)
+    .select("*")
+    .order("created_at", { ascending: true });
+
+  if (error) throw error;
+  return data || [];
 }
 
 async function findFund(query) {
@@ -366,6 +407,51 @@ Monthly SIP Total: ${formatINR(totalSip)}
   return summary;
 }
 
+// Daily cron endpoint
+app.get("/cron/daily-summary", async (req, res) => {
+  try {
+    const secret = req.query.secret;
+    if (secret !== CRON_SECRET) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const users = await getAllUsers();
+    let sent = 0;
+    let skipped = 0;
+
+    for (const user of users) {
+      try {
+        const summary = await buildSummaryText(user.chat_id);
+
+        if (!summary || summary.includes("No data found")) {
+          skipped++;
+          continue;
+        }
+
+        await sendTelegramMessage(user.chat_id, summary);
+        sent++;
+
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      } catch (err) {
+        console.error("Daily summary send error for user:", user.chat_id, err);
+      }
+    }
+
+    return res.json({
+      ok: true,
+      totalUsers: users.length,
+      sent,
+      skipped
+    });
+  } catch (err) {
+    console.error("Cron daily summary error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "unknown error"
+    });
+  }
+});
+
 app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.message;
@@ -374,6 +460,8 @@ app.post("/webhook", async (req, res) => {
     const chatId = String(message.chat.id);
     const rawText = (message.text || "").trim();
     const text = rawText.toLowerCase();
+
+    await registerUser(chatId);
 
     let reply = "Command received.";
 
