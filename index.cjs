@@ -86,64 +86,47 @@ async function sendTelegramMessage(chatId, text) {
   }
 }
 
-let schemeCache = {
-  data: null,
-  lastFetch: 0
-};
-
-async function getAllFunds() {
-  const now = Date.now();
-  const cacheMs = 12 * 60 * 60 * 1000;
-
-  if (schemeCache.data && now - schemeCache.lastFetch < cacheMs) {
-    return schemeCache.data;
-  }
-
-  const res = await fetch("https://api.mfapi.in/mf");
-  const data = await res.json();
-
-  schemeCache = {
-    data,
-    lastFetch: now
-  };
-
-  return data;
-}
-
 async function findFund(query) {
-  const allFunds = await getAllFunds();
-  const q = normalizeText(query);
-
+  const q = String(query || "").trim();
   if (!q) return null;
 
-  let exact = allFunds.find(
-    (f) =>
-      normalizeText(f.schemeName) === q ||
-      String(f.schemeCode).trim() === q
-  );
-  if (exact) return exact;
+  const res = await fetch(`https://api.mfapi.in/mf/search?q=${encodeURIComponent(q)}`);
+  if (!res.ok) {
+    throw new Error(`MFAPI search failed: ${res.status}`);
+  }
 
-  let starts = allFunds.find((f) =>
-    normalizeText(f.schemeName).startsWith(q)
-  );
-  if (starts) return starts;
+  const data = await res.json();
 
-  const contains = allFunds.filter((f) =>
-    normalizeText(f.schemeName).includes(q)
-  );
+  if (!Array.isArray(data) || data.length === 0) {
+    return null;
+  }
 
-  if (contains.length === 0) return null;
-
-  contains.sort((a, b) => a.schemeName.length - b.schemeName.length);
-  return contains[0];
+  return data[0];
 }
 
 async function getFundDetails(schemeCode) {
   const res = await fetch(`https://api.mfapi.in/mf/${schemeCode}`);
+  if (!res.ok) {
+    throw new Error(`MFAPI details failed: ${res.status}`);
+  }
   return res.json();
 }
 
 async function getLatestNav(schemeCode) {
+  const res = await fetch(`https://api.mfapi.in/mf/${schemeCode}/latest`);
+
+  if (res.ok) {
+    const latestData = await res.json();
+
+    if (latestData && latestData.meta && Array.isArray(latestData.data) && latestData.data[0]) {
+      return {
+        schemeName: latestData.meta.scheme_name || "",
+        nav: parseFloat(latestData.data[0].nav),
+        date: latestData.data[0].date
+      };
+    }
+  }
+
   const navData = await getFundDetails(schemeCode);
   const latest = navData && navData.data && navData.data[0] ? navData.data[0] : null;
 
@@ -431,7 +414,7 @@ app.post("/webhook", async (req, res) => {
           }
         } catch (err) {
           console.error("NAV error:", err);
-          reply = "Error fetching data.";
+          reply = "Error fetching data: " + (err.message || "unknown error");
         }
       }
     }
@@ -468,7 +451,7 @@ app.post("/webhook", async (req, res) => {
             }
           } catch (err) {
             console.error("Add SIP error:", err);
-            reply = "Error adding SIP.";
+            reply = "Error adding SIP: " + (err.message || "unknown error");
           }
         }
       }
@@ -500,7 +483,7 @@ app.post("/webhook", async (req, res) => {
           }
         } catch (err) {
           console.error("Remove SIP error:", err);
-          reply = "Error removing SIP.";
+          reply = "Error removing SIP: " + (err.message || "unknown error");
         }
       }
     }
@@ -526,7 +509,7 @@ app.post("/webhook", async (req, res) => {
         }
       } catch (err) {
         console.error("SIP list error:", err);
-        reply = "Error fetching SIPs.";
+        reply = "Error fetching SIPs: " + (err.message || "unknown error");
       }
     }
 
@@ -568,7 +551,7 @@ app.post("/webhook", async (req, res) => {
 
                 if (error) {
                   console.error("Supabase insert error:", error);
-                  reply = "Error saving portfolio.";
+                  reply = "Error saving portfolio: " + error.message;
                 } else {
                   reply =
                     `✅ Added to portfolio\n\n` +
@@ -581,7 +564,7 @@ app.post("/webhook", async (req, res) => {
             }
           } catch (err) {
             console.error("Add error:", err);
-            reply = "Error adding fund.";
+            reply = "Error adding fund: " + (err.message || "unknown error");
           }
         }
       }
@@ -613,7 +596,7 @@ app.post("/webhook", async (req, res) => {
           }
         } catch (err) {
           console.error("Remove holding error:", err);
-          reply = "Error removing holding.";
+          reply = "Error removing holding: " + (err.message || "unknown error");
         }
       }
     }
@@ -623,7 +606,7 @@ app.post("/webhook", async (req, res) => {
         reply = await buildPortfolioText(chatId);
       } catch (err) {
         console.error("Portfolio error:", err);
-        reply = "Error fetching portfolio.";
+        reply = "Error fetching portfolio: " + (err.message || "unknown error");
       }
     }
 
@@ -632,7 +615,7 @@ app.post("/webhook", async (req, res) => {
         reply = await buildSummaryText(chatId);
       } catch (err) {
         console.error("Summary error:", err);
-        reply = "Error generating summary.";
+        reply = "Error generating summary: " + (err.message || "unknown error");
       }
     }
 
