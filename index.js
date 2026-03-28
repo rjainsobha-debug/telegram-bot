@@ -1,34 +1,45 @@
 import express from "express";
 import fetch from "node-fetch";
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 app.use(express.json());
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-console.log("Token exists:", !!TOKEN);
+if (!TOKEN) {
+  console.error("Missing TELEGRAM_BOT_TOKEN");
+}
+if (!SUPABASE_URL) {
+  console.error("Missing SUPABASE_URL");
+}
+if (!SUPABASE_ANON_KEY) {
+  console.error("Missing SUPABASE_ANON_KEY");
+}
 
-// Temporary in-memory portfolio store
-// Format:
-// portfolios[chatId] = [
-//   { schemeName, schemeCode, investedAmount, units }
-// ]
-const portfolios = {};
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 app.get("/", (req, res) => {
   res.send("Bot is running ✅");
 });
 
-app.post("/webhook", async (req, res) => {
-  console.log("Webhook hit");
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    tokenConfigured: !!TOKEN,
+    supabaseConfigured: !!SUPABASE_URL && !!SUPABASE_ANON_KEY
+  });
+});
 
+app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.message;
+    if (!message) return res.status(200).send("ok");
 
-    if (!message) return res.send("ok");
-
-    const chatId = message.chat.id;
+    const chatId = String(message.chat.id);
     const rawText = (message.text || "").trim();
     const text = rawText.toLowerCase();
 
@@ -36,15 +47,12 @@ app.post("/webhook", async (req, res) => {
 
     if (text === "/start") {
       reply =
-        "Welcome to WealthNest 📊\n\nCommands:\n/nav fundname\n/add fund name | amount\n/portfolio\n/ping\n/help";
-
-    } else if (text === "/ping") {
-      reply = "Bot is live ✅";
-
+        "Welcome to WealthNest 📊\n\nCommands:\n/nav fundname\n/add fund name | amount\n/portfolio\n/help";
     } else if (text === "/help") {
       reply =
         "Commands:\n/nav fundname\n/add fund name | amount\n/portfolio\n\nExamples:\n/nav hdfc flexi cap\n/add hdfc flexi cap | 50000";
-
+    } else if (text === "/ping") {
+      reply = "Bot is live ✅";
     } else if (text.startsWith("/nav")) {
       const query = rawText.replace("/nav", "").trim();
 
@@ -53,21 +61,15 @@ app.post("/webhook", async (req, res) => {
       } else {
         try {
           const fund = await findFund(query);
-
           if (!fund) {
             reply = "Fund not found.";
           } else {
             const navData = await getFundDetails(fund.schemeCode);
             const latest = navData.data?.[0];
-
             if (!latest) {
               reply = "NAV data not available.";
             } else {
-              reply =
-`📊 ${navData.meta.scheme_name}
-
-NAV: ₹${latest.nav}
-Date: ${latest.date}`;
+              reply = `📊 ${navData.meta.scheme_name}\n\nNAV: ₹${latest.nav}\nDate: ${latest.date}`;
             }
           }
         } catch (err) {
@@ -75,7 +77,6 @@ Date: ${latest.date}`;
           reply = "Error fetching data.";
         }
       }
-
     } else if (text.startsWith("/add")) {
       const body = rawText.replace("/add", "").trim();
 
@@ -104,24 +105,22 @@ Date: ${latest.date}`;
                 const nav = parseFloat(latest.nav);
                 const units = amount / nav;
 
-                if (!portfolios[chatId]) {
-                  portfolios[chatId] = [];
+                const { error } = await supabase.from("portfolios").insert([
+                  {
+                    chat_id: chatId,
+                    scheme_name: navData.meta.scheme_name,
+                    scheme_code: String(fund.schemeCode),
+                    invested_amount: amount,
+                    units
+                  }
+                ]);
+
+                if (error) {
+                  console.error("Supabase insert error:", error);
+                  reply = "Error saving portfolio.";
+                } else {
+                  reply = `✅ Added to portfolio\n\nFund: ${navData.meta.scheme_name}\nInvested: ₹${amount.toFixed(2)}\nNAV: ₹${nav.toFixed(2)}\nUnits: ${units.toFixed(4)}`;
                 }
-
-                portfolios[chatId].push({
-                  schemeName: navData.meta.scheme_name,
-                  schemeCode: fund.schemeCode,
-                  investedAmount: amount,
-                  units
-                });
-
-                reply =
-`✅ Added to portfolio
-
-Fund: ${navData.meta.scheme_name}
-Invested: ₹${amount.toFixed(2)}
-NAV: ₹${nav.toFixed(2)}
-Units: ${units.toFixed(4)}`;
               }
             }
           } catch (err) {
@@ -130,34 +129,39 @@ Units: ${units.toFixed(4)}`;
           }
         }
       }
-
     } else if (text === "/portfolio") {
       try {
-        const userPortfolio = portfolios[chatId] || [];
+        const { data: userPortfolio, error } = await supabase
+          .from("portfolios")
+          .select("*")
+          .eq("chat_id", chatId)
+          .order("created_at", { ascending: true });
 
-        if (userPortfolio.length === 0) {
+        if (error) {
+          console.error("Supabase fetch error:", error);
+          reply = "Error fetching portfolio.";
+        } else if (!userPortfolio || userPortfolio.length === 0) {
           reply = "Your portfolio is empty.\nUse:\n/add fund name | amount";
         } else {
           let totalInvested = 0;
           let totalCurrentValue = 0;
-          let lines = ["📁 Your Portfolio\n"];
+          const lines = ["📁 Your Portfolio\n"];
 
           for (const item of userPortfolio) {
-            const navData = await getFundDetails(item.schemeCode);
+            const navData = await getFundDetails(item.scheme_code);
             const latest = navData.data?.[0];
-
             if (!latest) continue;
 
             const currentNav = parseFloat(latest.nav);
-            const currentValue = item.units * currentNav;
-            const gain = currentValue - item.investedAmount;
+            const currentValue = Number(item.units) * currentNav;
+            const gain = currentValue - Number(item.invested_amount);
 
-            totalInvested += item.investedAmount;
+            totalInvested += Number(item.invested_amount);
             totalCurrentValue += currentValue;
 
             lines.push(
-`${item.schemeName}
-Invested: ₹${item.investedAmount.toFixed(2)}
+              `${item.scheme_name}
+Invested: ₹${Number(item.invested_amount).toFixed(2)}
 Current: ₹${currentValue.toFixed(2)}
 Gain/Loss: ₹${gain.toFixed(2)}
 `
@@ -167,7 +171,7 @@ Gain/Loss: ₹${gain.toFixed(2)}
           const totalGain = totalCurrentValue - totalInvested;
 
           lines.push(
-`--------------------
+            `--------------------
 Total Invested: ₹${totalInvested.toFixed(2)}
 Current Value: ₹${totalCurrentValue.toFixed(2)}
 Total Gain/Loss: ₹${totalGain.toFixed(2)}`
@@ -179,28 +183,33 @@ Total Gain/Loss: ₹${totalGain.toFixed(2)}`
         console.error("Portfolio error:", err);
         reply = "Error fetching portfolio.";
       }
-
-    } else if (text.length > 0) {
-      reply = `You said: ${rawText}`;
+    } else {
+      reply = "Unknown command.\nType /help";
     }
 
-    await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: reply
-      })
-    });
-
-    res.send("ok");
+    await sendTelegramMessage(chatId, reply);
+    return res.status(200).send("ok");
   } catch (err) {
-    console.error("Error:", err);
-    res.status(500).send("error");
+    console.error("Webhook error:", err);
+    return res.status(500).send("error");
   }
 });
+
+async function sendTelegramMessage(chatId, text) {
+  const response = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text
+    })
+  });
+
+  const data = await response.json();
+  console.log("Telegram response:", data);
+}
 
 async function findFund(query) {
   const searchRes = await fetch(
