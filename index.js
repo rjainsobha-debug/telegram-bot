@@ -6,6 +6,16 @@ const app = express();
 app.use(express.json());
 
 // =========================
+// SAFE FETCH FALLBACK
+// =========================
+const fetchCompat = (...args) => {
+  if (typeof fetch !== "undefined") {
+    return fetch(...args);
+  }
+  return import("node-fetch").then(({ default: fetchFn }) => fetchFn(...args));
+};
+
+// =========================
 // ENV
 // =========================
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -13,21 +23,26 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const PORT = process.env.PORT || 3000;
 
-if (!TELEGRAM_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  throw new Error("Missing required environment variables.");
-}
+if (!TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
+if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
+if (!SUPABASE_ANON_KEY) throw new Error("Missing SUPABASE_ANON_KEY");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // =========================
-// BOT SETUP
+// BOT
 // =========================
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { webHook: true });
+const WEBHOOK_PATH = "/webhook";
 
-const WEBHOOK_PATH = `/webhook`;
 app.post(WEBHOOK_PATH, (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
+  try {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Webhook process error:", err);
+    res.sendStatus(500);
+  }
 });
 
 app.get("/", (_, res) => {
@@ -41,12 +56,11 @@ const MFAPI_SCHEME_LIST_URL = "https://api.mfapi.in/mf";
 const MFAPI_SCHEME_DETAILS_URL = (code) => `https://api.mfapi.in/mf/${code}`;
 const MFAPI_SCHEME_LATEST_URL = (code) => `https://api.mfapi.in/mf/${code}/latest`;
 
-// Change these if your Supabase table names are different.
 const HOLDINGS_TABLE = "mf_holdings";
 const SIPS_TABLE = "mf_sips";
 
 // =========================
-// SMALL HELPERS
+// HELPERS
 // =========================
 function normalizeText(s = "") {
   return String(s).trim().toLowerCase().replace(/\s+/g, " ");
@@ -69,18 +83,11 @@ function escapeMarkdown(text = "") {
   return String(text).replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
 }
 
-function splitCommandText(msgText = "") {
-  const firstSpace = msgText.indexOf(" ");
-  if (firstSpace === -1) return "";
-  return msgText.slice(firstSpace + 1).trim();
+function parsePipeInput(input = "") {
+  return input.split("|").map((x) => x.trim());
 }
 
-function parsePipeInput(input) {
-  const parts = input.split("|").map((x) => x.trim());
-  return parts;
-}
-
-function calculateXirrStyleSimplePct(currentValue, invested) {
+function simpleReturnPct(currentValue, invested) {
   if (!invested || invested <= 0) return 0;
   return ((currentValue - invested) / invested) * 100;
 }
@@ -93,16 +100,8 @@ async function safeSend(chatId, text, opts = {}) {
   }
 }
 
-// =========================
-// MFAPI HELPERS
-// =========================
-let schemeCache = {
-  data: null,
-  lastFetch: 0,
-};
-
 async function fetchJson(url) {
-  const response = await fetch(url, {
+  const response = await fetchCompat(url, {
     method: "GET",
     headers: { "Content-Type": "application/json" },
   });
@@ -114,19 +113,21 @@ async function fetchJson(url) {
   return response.json();
 }
 
+// =========================
+// MFAPI CACHE
+// =========================
+let schemeCache = { data: null, lastFetch: 0 };
+
 async function getAllSchemes() {
   const now = Date.now();
-  const cacheValidForMs = 1000 * 60 * 60 * 12; // 12 hours
+  const cacheMs = 12 * 60 * 60 * 1000;
 
-  if (schemeCache.data && now - schemeCache.lastFetch < cacheValidForMs) {
+  if (schemeCache.data && now - schemeCache.lastFetch < cacheMs) {
     return schemeCache.data;
   }
 
   const data = await fetchJson(MFAPI_SCHEME_LIST_URL);
-  schemeCache = {
-    data,
-    lastFetch: now,
-  };
+  schemeCache = { data, lastFetch: now };
   return data;
 }
 
@@ -164,8 +165,8 @@ async function getLatestNavBySchemeCode(schemeCode) {
     const latest = await fetchJson(MFAPI_SCHEME_LATEST_URL(schemeCode));
     const nav = Number(latest?.data?.[0]?.nav || latest?.data?.nav || 0);
     if (nav > 0) return nav;
-  } catch (_) {
-    // fallback below
+  } catch (e) {
+    console.log("Latest NAV fallback:", e.message);
   }
 
   const details = await fetchJson(MFAPI_SCHEME_DETAILS_URL(schemeCode));
@@ -210,6 +211,18 @@ async function getSips(chatId) {
   return data || [];
 }
 
+async function getSingleRowByKeys(table, chatId, schemeCode) {
+  const { data, error } = await supabase
+    .from(table)
+    .select("*")
+    .eq("chat_id", String(chatId))
+    .eq("scheme_code", String(schemeCode))
+    .limit(1);
+
+  if (error) throw error;
+  return data && data.length ? data[0] : null;
+}
+
 async function upsertHolding({
   chatId,
   schemeCode,
@@ -218,14 +231,7 @@ async function upsertHolding({
   units,
   navAtPurchase,
 }) {
-  const { data: existing, error: fetchErr } = await supabase
-    .from(HOLDINGS_TABLE)
-    .select("*")
-    .eq("chat_id", String(chatId))
-    .eq("scheme_code", String(schemeCode))
-    .maybeSingle();
-
-  if (fetchErr) throw fetchErr;
+  const existing = await getSingleRowByKeys(HOLDINGS_TABLE, chatId, schemeCode);
 
   if (!existing) {
     const { error } = await supabase.from(HOLDINGS_TABLE).insert([
@@ -240,7 +246,6 @@ async function upsertHolding({
         updated_at: new Date().toISOString(),
       },
     ]);
-
     if (error) throw error;
     return;
   }
@@ -264,29 +269,8 @@ async function upsertHolding({
   if (error) throw error;
 }
 
-async function removeHolding(chatId, fundQuery) {
-  const holding = await findHoldingByQuery(chatId, fundQuery);
-  if (!holding) return null;
-
-  const { error } = await supabase
-    .from(HOLDINGS_TABLE)
-    .delete()
-    .eq("chat_id", String(chatId))
-    .eq("scheme_code", String(holding.scheme_code));
-
-  if (error) throw error;
-  return holding;
-}
-
 async function upsertSip({ chatId, schemeCode, schemeName, sipAmount }) {
-  const { data: existing, error: fetchErr } = await supabase
-    .from(SIPS_TABLE)
-    .select("*")
-    .eq("chat_id", String(chatId))
-    .eq("scheme_code", String(schemeCode))
-    .maybeSingle();
-
-  if (fetchErr) throw fetchErr;
+  const existing = await getSingleRowByKeys(SIPS_TABLE, chatId, schemeCode);
 
   if (!existing) {
     const { error } = await supabase.from(SIPS_TABLE).insert([
@@ -300,7 +284,6 @@ async function upsertSip({ chatId, schemeCode, schemeName, sipAmount }) {
         updated_at: new Date().toISOString(),
       },
     ]);
-
     if (error) throw error;
     return;
   }
@@ -319,6 +302,52 @@ async function upsertSip({ chatId, schemeCode, schemeName, sipAmount }) {
   if (error) throw error;
 }
 
+async function findHoldingByQuery(chatId, query) {
+  const holdings = await getHoldings(chatId);
+  const q = normalizeText(query);
+
+  let item = holdings.find(
+    (h) => normalizeText(h.scheme_name) === q || String(h.scheme_code) === query.trim()
+  );
+  if (item) return item;
+
+  item = holdings.find((h) => normalizeText(h.scheme_name).startsWith(q));
+  if (item) return item;
+
+  const matches = holdings.filter((h) => normalizeText(h.scheme_name).includes(q));
+  return matches[0] || null;
+}
+
+async function findSipByQuery(chatId, query) {
+  const sips = await getSips(chatId);
+  const q = normalizeText(query);
+
+  let item = sips.find(
+    (h) => normalizeText(h.scheme_name) === q || String(h.scheme_code) === query.trim()
+  );
+  if (item) return item;
+
+  item = sips.find((h) => normalizeText(h.scheme_name).startsWith(q));
+  if (item) return item;
+
+  const matches = sips.filter((h) => normalizeText(h.scheme_name).includes(q));
+  return matches[0] || null;
+}
+
+async function removeHolding(chatId, fundQuery) {
+  const holding = await findHoldingByQuery(chatId, fundQuery);
+  if (!holding) return null;
+
+  const { error } = await supabase
+    .from(HOLDINGS_TABLE)
+    .delete()
+    .eq("chat_id", String(chatId))
+    .eq("scheme_code", String(holding.scheme_code));
+
+  if (error) throw error;
+  return holding;
+}
+
 async function removeSip(chatId, fundQuery) {
   const sip = await findSipByQuery(chatId, fundQuery);
   if (!sip) return null;
@@ -333,46 +362,8 @@ async function removeSip(chatId, fundQuery) {
   return sip;
 }
 
-async function findHoldingByQuery(chatId, query) {
-  const holdings = await getHoldings(chatId);
-  const q = normalizeText(query);
-
-  let exact = holdings.find(
-    (h) =>
-      normalizeText(h.scheme_name) === q || String(h.scheme_code).trim() === query.trim()
-  );
-  if (exact) return exact;
-
-  let starts = holdings.find((h) => normalizeText(h.scheme_name).startsWith(q));
-  if (starts) return starts;
-
-  let contains = holdings.filter((h) => normalizeText(h.scheme_name).includes(q));
-  if (contains.length === 1) return contains[0];
-
-  return contains[0] || null;
-}
-
-async function findSipByQuery(chatId, query) {
-  const sips = await getSips(chatId);
-  const q = normalizeText(query);
-
-  let exact = sips.find(
-    (s) =>
-      normalizeText(s.scheme_name) === q || String(s.scheme_code).trim() === query.trim()
-  );
-  if (exact) return exact;
-
-  let starts = sips.find((s) => normalizeText(s.scheme_name).startsWith(q));
-  if (starts) return starts;
-
-  let contains = sips.filter((s) => normalizeText(s.scheme_name).includes(q));
-  if (contains.length === 1) return contains[0];
-
-  return contains[0] || null;
-}
-
 // =========================
-// PORTFOLIO CALC HELPERS
+// PORTFOLIO
 // =========================
 async function enrichHolding(holding) {
   const latestNav = await getLatestNavBySchemeCode(holding.scheme_code);
@@ -380,7 +371,7 @@ async function enrichHolding(holding) {
   const units = Number(holding.total_units || 0);
   const currentValue = units * latestNav;
   const profit = currentValue - invested;
-  const profitPct = calculateXirrStyleSimplePct(currentValue, invested);
+  const profitPct = simpleReturnPct(currentValue, invested);
 
   return {
     ...holding,
@@ -402,7 +393,7 @@ async function buildPortfolioData(chatId) {
     try {
       enriched.push(await enrichHolding(h));
     } catch (e) {
-      console.error("NAV fetch error for holding:", h.scheme_name, e.message);
+      console.error("NAV error for", h.scheme_name, e.message);
     }
   }
 
@@ -428,9 +419,7 @@ async function buildSummaryText(chatId) {
     totalProfit += item.profit;
   }
 
-  const totalProfitPct =
-    totalInvested > 0 ? (totalProfit / totalInvested) * 100 : 0;
-
+  const totalProfitPct = totalInvested > 0 ? (totalProfit / totalInvested) * 100 : 0;
   const activeSips = sips.filter((x) => x.is_active !== false);
   const totalSip = activeSips.reduce((sum, x) => sum + Number(x.sip_amount || 0), 0);
 
@@ -470,37 +459,33 @@ async function buildSummaryText(chatId) {
 // =========================
 // COMMANDS
 // =========================
-bot.onText(/^\/start$/, async (msg) => {
+bot.onText(/^\/start$/i, async (msg) => {
   const chatId = msg.chat.id;
+  await safeSend(
+    chatId,
+    `Welcome to your Mutual Fund Bot 🚀
 
-  const text =
-    `Welcome to your Mutual Fund Bot 🚀\n\n` +
-    `Available commands:\n` +
-    `/nav fundname\n` +
-    `/add fund name | amount\n` +
-    `/remove fundname\n` +
-    `/portfolio\n` +
-    `/addsip fund name | monthly amount\n` +
-    `/removesip fundname\n` +
-    `/sips\n` +
-    `/summary\n`;
-
-  await safeSend(chatId, text);
+Available commands:
+/nav fundname
+/add fund name | amount
+/remove fundname
+/portfolio
+/addsip fund name | monthly amount
+/removesip fundname
+/sips
+/summary`
+  );
 });
 
 bot.onText(/^\/nav(?:\s+(.+))?$/i, async (msg, match) => {
   const chatId = msg.chat.id;
-  const query = (match && match[1] ? match[1] : "").trim();
+  const query = (match?.[1] || "").trim();
 
-  if (!query) {
-    return safeSend(chatId, "Usage:\n/nav fund name");
-  }
+  if (!query) return safeSend(chatId, "Usage:\n/nav fund name");
 
   try {
     const scheme = await resolveScheme(query);
-    if (!scheme) {
-      return safeSend(chatId, "Fund not found.");
-    }
+    if (!scheme) return safeSend(chatId, "Fund not found.");
 
     const text =
       `📌 *NAV Details*\n\n` +
@@ -517,11 +502,9 @@ bot.onText(/^\/nav(?:\s+(.+))?$/i, async (msg, match) => {
 
 bot.onText(/^\/add(?:\s+([\s\S]+))?$/i, async (msg, match) => {
   const chatId = msg.chat.id;
-  const raw = (match && match[1] ? match[1] : "").trim();
+  const raw = (match?.[1] || "").trim();
 
-  if (!raw) {
-    return safeSend(chatId, "Usage:\n/add fund name | amount");
-  }
+  if (!raw) return safeSend(chatId, "Usage:\n/add fund name | amount");
 
   try {
     const [fundName, amountStr] = parsePipeInput(raw);
@@ -532,9 +515,7 @@ bot.onText(/^\/add(?:\s+([\s\S]+))?$/i, async (msg, match) => {
     }
 
     const scheme = await resolveScheme(fundName);
-    if (!scheme) {
-      return safeSend(chatId, "Fund not found.");
-    }
+    if (!scheme) return safeSend(chatId, "Fund not found.");
 
     const units = amount / scheme.latestNav;
 
@@ -547,33 +528,30 @@ bot.onText(/^\/add(?:\s+([\s\S]+))?$/i, async (msg, match) => {
       navAtPurchase: scheme.latestNav,
     });
 
-    const text =
-      `✅ Added investment\n\n` +
-      `Fund: ${scheme.schemeName}\n` +
-      `Amount: ${formatINR(amount)}\n` +
-      `NAV: ${formatINR(scheme.latestNav)}\n` +
-      `Units: ${units.toFixed(4)}`;
+    await safeSend(
+      chatId,
+      `✅ Added investment
 
-    await safeSend(chatId, text);
+Fund: ${scheme.schemeName}
+Amount: ${formatINR(amount)}
+NAV: ${formatINR(scheme.latestNav)}
+Units: ${units.toFixed(4)}`
+    );
   } catch (e) {
     console.error("/add error:", e);
-    await safeSend(chatId, "Unable to add fund. Check Supabase table/columns once.");
+    await safeSend(chatId, "Unable to add fund. Check Supabase tables once.");
   }
 });
 
 bot.onText(/^\/remove(?:\s+([\s\S]+))?$/i, async (msg, match) => {
   const chatId = msg.chat.id;
-  const query = (match && match[1] ? match[1] : "").trim();
+  const query = (match?.[1] || "").trim();
 
-  if (!query) {
-    return safeSend(chatId, "Usage:\n/remove fundname");
-  }
+  if (!query) return safeSend(chatId, "Usage:\n/remove fundname");
 
   try {
     const removed = await removeHolding(chatId, query);
-    if (!removed) {
-      return safeSend(chatId, "Holding not found.");
-    }
+    if (!removed) return safeSend(chatId, "Holding not found.");
 
     await safeSend(chatId, `🗑 Removed holding:\n${removed.scheme_name}`);
   } catch (e) {
@@ -587,7 +565,6 @@ bot.onText(/^\/portfolio$/i, async (msg) => {
 
   try {
     const portfolio = await buildPortfolioData(chatId);
-
     if (!portfolio.length) {
       return safeSend(chatId, "No holdings found.\nUse /add fund name | amount");
     }
@@ -611,8 +588,7 @@ bot.onText(/^\/portfolio$/i, async (msg) => {
       text += `• Latest NAV: ${escapeMarkdown(formatINR(item.latestNav))}\n\n`;
     }
 
-    const totalProfitPct =
-      totalInvested > 0 ? (totalProfit / totalInvested) * 100 : 0;
+    const totalProfitPct = totalInvested > 0 ? (totalProfit / totalInvested) * 100 : 0;
 
     text += `*Total Portfolio*\n`;
     text += `• Invested: ${escapeMarkdown(formatINR(totalInvested))}\n`;
@@ -628,11 +604,9 @@ bot.onText(/^\/portfolio$/i, async (msg) => {
 
 bot.onText(/^\/addsip(?:\s+([\s\S]+))?$/i, async (msg, match) => {
   const chatId = msg.chat.id;
-  const raw = (match && match[1] ? match[1] : "").trim();
+  const raw = (match?.[1] || "").trim();
 
-  if (!raw) {
-    return safeSend(chatId, "Usage:\n/addsip fund name | monthly amount");
-  }
+  if (!raw) return safeSend(chatId, "Usage:\n/addsip fund name | monthly amount");
 
   try {
     const [fundName, sipAmountStr] = parsePipeInput(raw);
@@ -643,9 +617,7 @@ bot.onText(/^\/addsip(?:\s+([\s\S]+))?$/i, async (msg, match) => {
     }
 
     const scheme = await resolveScheme(fundName);
-    if (!scheme) {
-      return safeSend(chatId, "Fund not found.");
-    }
+    if (!scheme) return safeSend(chatId, "Fund not found.");
 
     await upsertSip({
       chatId,
@@ -654,31 +626,28 @@ bot.onText(/^\/addsip(?:\s+([\s\S]+))?$/i, async (msg, match) => {
       sipAmount,
     });
 
-    const text =
-      `✅ SIP added/updated\n\n` +
-      `Fund: ${scheme.schemeName}\n` +
-      `Monthly SIP: ${formatINR(sipAmount)}`;
+    await safeSend(
+      chatId,
+      `✅ SIP added/updated
 
-    await safeSend(chatId, text);
+Fund: ${scheme.schemeName}
+Monthly SIP: ${formatINR(sipAmount)}`
+    );
   } catch (e) {
     console.error("/addsip error:", e);
-    await safeSend(chatId, "Unable to add SIP. Check Supabase table/columns once.");
+    await safeSend(chatId, "Unable to add SIP. Check Supabase tables once.");
   }
 });
 
 bot.onText(/^\/removesip(?:\s+([\s\S]+))?$/i, async (msg, match) => {
   const chatId = msg.chat.id;
-  const query = (match && match[1] ? match[1] : "").trim();
+  const query = (match?.[1] || "").trim();
 
-  if (!query) {
-    return safeSend(chatId, "Usage:\n/removesip fundname");
-  }
+  if (!query) return safeSend(chatId, "Usage:\n/removesip fundname");
 
   try {
     const removed = await removeSip(chatId, query);
-    if (!removed) {
-      return safeSend(chatId, "SIP not found.");
-    }
+    if (!removed) return safeSend(chatId, "SIP not found.");
 
     await safeSend(chatId, `🗑 Removed SIP:\n${removed.scheme_name}`);
   } catch (e) {
@@ -726,14 +695,16 @@ bot.onText(/^\/summary$/i, async (msg) => {
   }
 });
 
-// Fallback for unknown text commands
+// =========================
+// UNKNOWN COMMANDS
+// =========================
 bot.on("message", async (msg) => {
   const text = msg.text || "";
   const chatId = msg.chat.id;
 
   if (!text.startsWith("/")) return;
 
-  const knownPrefixes = [
+  const known = [
     "/start",
     "/nav",
     "/add",
@@ -745,8 +716,8 @@ bot.on("message", async (msg) => {
     "/summary",
   ];
 
-  const matched = knownPrefixes.some((cmd) => text.toLowerCase().startsWith(cmd));
-  if (!matched) {
+  const ok = known.some((cmd) => text.toLowerCase().startsWith(cmd));
+  if (!ok) {
     await safeSend(
       chatId,
       "Unknown command.\n\nUse:\n/start\n/nav fundname\n/add fund | amount\n/remove fundname\n/portfolio\n/addsip fund | amount\n/removesip fundname\n/sips\n/summary"
@@ -755,29 +726,37 @@ bot.on("message", async (msg) => {
 });
 
 // =========================
-// START SERVER + WEBHOOK
+// START SERVER
 // =========================
-app.listen(PORT, async () => {
+app.listen(PORT, "0.0.0.0", async () => {
   console.log(`Server running on port ${PORT}`);
 
   try {
-    const railwayDomain =
+    const domain =
       process.env.RAILWAY_PUBLIC_DOMAIN ||
       process.env.RAILWAY_STATIC_URL ||
       process.env.PUBLIC_URL;
 
-    if (railwayDomain) {
-      const domain = railwayDomain.startsWith("http")
-        ? railwayDomain
-        : `https://${railwayDomain}`;
-
-      const webhookUrl = `${domain}${WEBHOOK_PATH}`;
+    if (domain) {
+      const base = domain.startsWith("http") ? domain : `https://${domain}`;
+      const webhookUrl = `${base}${WEBHOOK_PATH}`;
       await bot.setWebHook(webhookUrl);
       console.log("Webhook set to:", webhookUrl);
     } else {
-      console.log("No public domain env found. Webhook not auto-set.");
+      console.log("No public domain variable found, webhook not auto-set.");
     }
   } catch (e) {
     console.error("Webhook setup error:", e.message);
   }
+});
+
+// =========================
+// CRASH LOGGING
+// =========================
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
 });
