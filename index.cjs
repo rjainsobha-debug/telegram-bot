@@ -288,6 +288,84 @@ async function upsertSip(chatId, schemeCode, schemeName, sipAmount) {
   if (error) throw error;
 }
 
+async function sellHolding(chatId, query, sellAmount) {
+  const holding = await findHolding(chatId, query);
+  if (!holding) {
+    throw new Error("Holding not found.");
+  }
+
+  const latest = await getLatestNav(holding.scheme_code);
+  if (!latest || !latest.nav || latest.nav <= 0) {
+    throw new Error("NAV data not available.");
+  }
+
+  const invested = Number(holding.invested_amount || 0);
+  const units = Number(holding.units || 0);
+  const currentValue = units * Number(latest.nav);
+
+  if (sellAmount <= 0) {
+    throw new Error("Sell amount must be greater than zero.");
+  }
+
+  if (sellAmount > currentValue + 0.01) {
+    throw new Error(`Sell amount exceeds current value ${formatINR(currentValue)}.`);
+  }
+
+  const unitsToSell = sellAmount / Number(latest.nav);
+
+  if (unitsToSell > units + 0.000001) {
+    throw new Error("Not enough units to sell.");
+  }
+
+  const costPerUnit = units > 0 ? invested / units : 0;
+  const costOfSoldUnits = costPerUnit * unitsToSell;
+  const realizedProfit = sellAmount - costOfSoldUnits;
+
+  const remainingUnits = Math.max(0, units - unitsToSell);
+  const remainingInvested = Math.max(0, invested - costOfSoldUnits);
+
+  if (remainingUnits <= 0.000001 || remainingInvested <= 0.01) {
+    const { error } = await supabase
+      .from(HOLDINGS_TABLE)
+      .delete()
+      .eq("id", holding.id);
+
+    if (error) throw error;
+
+    return {
+      schemeName: holding.scheme_name,
+      nav: Number(latest.nav),
+      sellAmount,
+      unitsSold: unitsToSell,
+      realizedProfit,
+      fullySold: true,
+      remainingUnits: 0,
+      remainingInvested: 0
+    };
+  }
+
+  const { error } = await supabase
+    .from(HOLDINGS_TABLE)
+    .update({
+      invested_amount: remainingInvested,
+      units: remainingUnits
+    })
+    .eq("id", holding.id);
+
+  if (error) throw error;
+
+  return {
+    schemeName: holding.scheme_name,
+    nav: Number(latest.nav),
+    sellAmount,
+    unitsSold: unitsToSell,
+    realizedProfit,
+    fullySold: false,
+    remainingUnits,
+    remainingInvested
+  };
+}
+
 async function buildPortfolioText(chatId) {
   const userPortfolio = await getPortfolio(chatId);
 
@@ -407,7 +485,6 @@ Monthly SIP Total: ${formatINR(totalSip)}
   return summary;
 }
 
-// Daily cron endpoint
 app.get("/cron/daily-summary", async (req, res) => {
   try {
     const secret = req.query.secret;
@@ -471,6 +548,7 @@ app.post("/webhook", async (req, res) => {
         "Commands:\n" +
         "/nav fundname\n" +
         "/add fund name | amount\n" +
+        "/sell fund name | amount\n" +
         "/remove fundname\n" +
         "/portfolio\n" +
         "/addsip fund name | monthly amount\n" +
@@ -601,6 +679,45 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
+    else if (text.startsWith("/sell")) {
+      const body = rawText.replace("/sell", "").trim();
+
+      if (!body.includes("|")) {
+        reply = "Invalid format.\nUse:\n/sell fund name | amount\nExample:\n/sell hdfc flexi cap | 10000";
+      } else {
+        const [fundNameRaw, amountRaw] = body.split("|");
+        const fundName = (fundNameRaw || "").trim();
+        const amount = parseFloat((amountRaw || "").trim());
+
+        if (!fundName || Number.isNaN(amount) || amount <= 0) {
+          reply = "Please enter valid fund name and sell amount.\nExample:\n/sell hdfc flexi cap | 10000";
+        } else {
+          try {
+            const result = await sellHolding(chatId, fundName, amount);
+
+            reply =
+              `✅ Sell processed\n\n` +
+              `Fund: ${result.schemeName}\n` +
+              `Sell Amount: ${formatINR(result.sellAmount)}\n` +
+              `NAV Used: ${formatINR(result.nav)}\n` +
+              `Units Sold: ${result.unitsSold.toFixed(4)}\n` +
+              `Realized P/L: ${formatINR(result.realizedProfit)}\n`;
+
+            if (result.fullySold) {
+              reply += `Holding Status: Fully sold`;
+            } else {
+              reply +=
+                `Remaining Units: ${result.remainingUnits.toFixed(4)}\n` +
+                `Remaining Invested: ${formatINR(result.remainingInvested)}`;
+            }
+          } catch (err) {
+            console.error("Sell error:", err);
+            reply = "Error selling fund: " + (err.message || "unknown error");
+          }
+        }
+      }
+    }
+
     else if (text.startsWith("/add")) {
       const body = rawText.replace("/add", "").trim();
 
@@ -714,6 +831,7 @@ app.post("/webhook", async (req, res) => {
         "/start\n" +
         "/nav fundname\n" +
         "/add fund | amount\n" +
+        "/sell fund | amount\n" +
         "/remove fundname\n" +
         "/portfolio\n" +
         "/addsip fund | amount\n" +
