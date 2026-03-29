@@ -125,11 +125,13 @@ function parseSipCommand(text) {
 }
 function parseRegisterCommand(text) {
   const parts = commandBody(text).split("|").map(x => x.trim());
-  if (parts.length < 2) return null;
+  if (parts.length < 4) return null;
   const name = parts[0];
   const city = parts[1];
-  if (!name || !city) return null;
-  return { name, city };
+  const mobile = parts[2];
+  const email = parts[3];
+  if (!name || !city || !mobile || !email) return null;
+  return { name, city, mobile, email };
 }
 function scoreMatch(inputNorm, schemeNorm) {
   if (!inputNorm || !schemeNorm) return 0;
@@ -253,10 +255,10 @@ async function getDistinctChatIds() {
   return [...new Set((data || []).map(r => String(r[USER_COL])).filter(Boolean))];
 }
 
-async function registerUser(chatId, name, city) {
+async function registerUser(chatId, name, city, mobile, email) {
   try {
     const { error } = await supabase.from(USERS_TABLE).upsert(
-      { chat_id: String(chatId), name, city, updated_at: nowIso() },
+      { chat_id: String(chatId), name, city, mobile, email, updated_at: nowIso() },
       { onConflict: "chat_id" }
     );
     if (error) throw error;
@@ -268,7 +270,7 @@ async function registerUser(chatId, name, city) {
   }
   return {
     ok: true,
-    message: `✅ <b>Registered successfully</b>\n\n👤 Name: <b>${escapeHtml(name)}</b>\n📍 City: <b>${escapeHtml(city)}</b>`
+    message: `✅ <b>Registered successfully</b>\n\n👤 Name: <b>${escapeHtml(name)}</b>\n📍 City: <b>${escapeHtml(city)}</b>\n📱 Mobile: <b>${escapeHtml(mobile)}</b>\n📧 Email: <b>${escapeHtml(email)}</b>`
   };
 }
 async function markLead(chatId) {
@@ -375,7 +377,7 @@ function formatLeadTimestamp() {
   });
 }
 
-async function sendWhatsAppLeadAlert({ chatId, name, city }) {
+async function sendWhatsAppLeadAlert({ chatId, name, city, mobile, email }) {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !WHATSAPP_FROM || !WHATSAPP_TO) {
     console.warn("WhatsApp alert skipped: missing Twilio/WhatsApp env vars");
     return { ok: false, skipped: true };
@@ -691,23 +693,25 @@ async function handleTextMessage(chatId, text) {
         chatId,
         name: user?.name,
         city: user?.city,
+        mobile: user?.mobile,
+        email: user?.email,
       });
       await sendTelegramMessage(chatId, `🔥 <b>Great!</b>\n\nOur expert will connect with you shortly for portfolio review.`);
       console.log("NEW LEAD:", chatId);
       return;
     }
     if (lower === "/start") {
-      await sendTelegramMessage(chatId, `👋 <b>Mutual Fund Bot Ready</b>\n\nCommands:\n<code>/add hdfc flexi cap | 5000</code>\n<code>/sell hdfc flexi cap | 2000</code>\n<code>/portfolio</code>\n<code>/summary</code>\n<code>/sip hdfc flexi cap | 5000 | monthly</code>\n<code>/sips</code>\n<code>/register Rahul | Delhi</code>\n<code>/help</code>`);
+      await sendTelegramMessage(chatId, `👋 <b>Mutual Fund Bot Ready</b>\n\nCommands:\n<code>/add hdfc flexi cap | 5000</code>\n<code>/sell hdfc flexi cap | 2000</code>\n<code>/portfolio</code>\n<code>/summary</code>\n<code>/sip hdfc flexi cap | 5000 | monthly</code>\n<code>/sips</code>\n<code>/register Rahul | Delhi | 8882332050 | rahul23jain@gmail.com</code>\n<code>/help</code>`);
       return;
     }
     if (lower === "/help") {
-      await sendTelegramMessage(chatId, `🛠 <b>Available Commands</b>\n\n1. Buy:\n<code>/add hdfc flexi cap | 5000</code>\n\n2. Sell:\n<code>/sell hdfc flexi cap | 2000</code>\n\n3. View holdings:\n<code>/portfolio</code>\n\n4. Summary:\n<code>/summary</code>\n\n5. Create or update SIP:\n<code>/sip hdfc flexi cap | 5000 | monthly</code>\n\n6. View SIPs:\n<code>/sips</code>\n\n7. Register yourself:\n<code>/register Rahul | Delhi</code>`);
+      await sendTelegramMessage(chatId, `🛠 <b>Available Commands</b>\n\n1. Buy:\n<code>/add hdfc flexi cap | 5000</code>\n\n2. Sell:\n<code>/sell hdfc flexi cap | 2000</code>\n\n3. View holdings:\n<code>/portfolio</code>\n\n4. Summary:\n<code>/summary</code>\n\n5. Create or update SIP:\n<code>/sip hdfc flexi cap | 5000 | monthly</code>\n\n6. View SIPs:\n<code>/sips</code>\n\n7. Register yourself:\n<code>/register Rahul | Delhi | 8882332050 | rahul23jain@gmail.com</code>`);
       return;
     }
     if (lower.startsWith("/register ")) {
       const parsed = parseRegisterCommand(normalized);
-      if (!parsed) return await sendTelegramMessage(chatId, `❌ Invalid register format.\n\nUse:\n<code>/register Rahul | Delhi</code>`);
-      const result = await registerUser(chatId, parsed.name, parsed.city);
+      if (!parsed) return await sendTelegramMessage(chatId, `❌ Invalid register format.\n\nUse:\n<code>/register Rahul | Delhi | 8882332050 | rahul23jain@gmail.com</code>`);
+      const result = await registerUser(chatId, parsed.name, parsed.city, parsed.mobile, parsed.email);
       return await sendTelegramMessage(chatId, result.message);
     }
     if (lower.startsWith("/add ")) {
