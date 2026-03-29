@@ -239,6 +239,10 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
     ...extra,
   };
 
+  if (payload.reply_markup) {
+    payload.reply_markup = JSON.stringify(payload.reply_markup);
+  }
+
   const resp = await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
