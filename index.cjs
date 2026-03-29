@@ -757,7 +757,7 @@ async function sendWhatsAppLeadAlert({ chatId, name, city, mobile, email }) {
     `Top Fund: ${portfolio.topFund?.fundName || "N/A"}\n\n` +
     `SIPs: ${sip.count}\n` +
     `Monthly SIP: ${formatINR(sip.totalMonthly)}\n\n` +
-    `Action: Replied YES for portfolio review\n` +
+    `Action: Portfolio review interest captured\n` +
     `Time: ${leadTime}\n` +
     `Call this lead now.`;
 
@@ -785,6 +785,20 @@ async function sendWhatsAppLeadAlert({ chatId, name, city, mobile, email }) {
     return { ok: false, error: data };
   }
   return { ok: true, sid: data.sid };
+}
+
+async function sendAutoLeadAlert(chatId, actionLabel) {
+  await markLead(chatId);
+  const user = await getBotUser(chatId);
+  const result = await sendWhatsAppLeadAlert({
+    chatId,
+    name: user?.name,
+    city: user?.city,
+    mobile: user?.mobile,
+    email: user?.email,
+  });
+  console.log(`AUTO LEAD ALERT (${actionLabel}):`, chatId, result?.ok ? "sent" : "skipped");
+  return result;
 }
 
 // =======================
@@ -1070,17 +1084,7 @@ async function handleTextMessage(chatId, text) {
 
   try {
     if (lower === "yes") {
-      await markLead(chatId);
-
-      const user = await getBotUser(chatId);
-      await sendWhatsAppLeadAlert({
-        chatId,
-        name: user?.name,
-        city: user?.city,
-        mobile: user?.mobile,
-        email: user?.email,
-      });
-
+      await sendAutoLeadAlert(chatId, "yes");
       await sendTelegramMessage(
         chatId,
         `🔥 <b>Great!</b>\n\nOur expert will connect with you shortly for portfolio review.`
@@ -1179,6 +1183,7 @@ async function handleTextMessage(chatId, text) {
 
     if (lower === "/summary") {
       await sendTelegramMessage(chatId, await buildSummary(chatId, false));
+      await sendAutoLeadAlert(chatId, "summary");
       return;
     }
 
