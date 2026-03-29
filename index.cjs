@@ -1,10 +1,12 @@
 // index.cjs
-// Mutual Fund Telegram Bot
+// Mutual Fund Telegram Bot with SIP Support
 // Features:
 // - /add fund name | amount
 // - /sell fund name | amount
 // - /portfolio
 // - /summary
+// - /sip fund name | amount | monthly
+// - /sips
 // - /help
 // - Auto daily report endpoint: GET /cron/summary?token=YOUR_CRON_SECRET
 //
@@ -19,6 +21,7 @@
 // CRON_SECRET=any-secret-string
 // HOLDINGS_TABLE=holdings
 // TRANSACTIONS_TABLE=transactions
+// SIPS_TABLE=sip_plans
 // USER_COL=chat_id
 // FUND_NAME_COL=fund_name
 // UNITS_COL=units
@@ -39,8 +42,13 @@
 //   id (optional), chat_id, fund_name, type, amount, nav, units,
 //   scheme_code, created_at
 //
+// sip_plans (new for SIP support):
+//   id (optional), chat_id, fund_name, amount, frequency, scheme_code,
+//   is_active, next_due_date, last_run_date, created_at, updated_at
+//
 // Notes:
 // - If transactions table does not exist, bot will continue working.
+// - If sip_plans table does not exist, /sip and /sips will return a helpful error.
 // - This file assumes Node 18+ (global fetch available).
 // - Railway can call /cron/summary?token=CRON_SECRET on a schedule.
 
@@ -59,6 +67,7 @@ const CRON_SECRET = process.env.CRON_SECRET || "change-me";
 
 const HOLDINGS_TABLE = process.env.HOLDINGS_TABLE || "holdings";
 const TRANSACTIONS_TABLE = process.env.TRANSACTIONS_TABLE || "transactions";
+const SIPS_TABLE = process.env.SIPS_TABLE || "sip_plans";
 
 const USER_COL = process.env.USER_COL || "chat_id";
 const FUND_NAME_COL = process.env.FUND_NAME_COL || "fund_name";
@@ -96,8 +105,8 @@ app.use(express.json({ limit: "1mb" }));
 // =======================
 const navCache = {
   lastFetchMs: 0,
-  byCode: new Map(),   // schemeCode -> { code, name, nav, date }
-  all: [],             // array of schemes
+  byCode: new Map(),
+  all: [],
 };
 
 const NAV_CACHE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
@@ -107,6 +116,42 @@ const NAV_CACHE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
 // =======================
 function nowIso() {
   return new Date().toISOString();
+}
+
+function todayYmd() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function parseYmdToDate(ymd) {
+  const [y, m, d] = String(ymd || "").split("-").map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+function formatDisplayDate(ymd) {
+  const dt = parseYmdToDate(ymd);
+  if (!dt) return String(ymd || "");
+  return dt.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function addMonthsToYmd(ymd, months) {
+  const dt = parseYmdToDate(ymd);
+  if (!dt) return todayYmd();
+  const year = dt.getUTCFullYear();
+  const month = dt.getUTCMonth();
+  const day = dt.getUTCDate();
+
+  const temp = new Date(Date.UTC(year, month + months + 1, 0));
+  const lastDayOfTargetMonth = temp.getUTCDate();
+  const safeDay = Math.min(day, lastDayOfTargetMonth);
+
+  const out = new Date(Date.UTC(year, month + months, safeDay));
+  return out.toISOString().slice(0, 10);
 }
 
 function normalizeText(value) {
@@ -141,11 +186,6 @@ function round4(num) {
   return Math.round((Number(num) + Number.EPSILON) * 10000) / 10000;
 }
 
-function pct(part, total) {
-  if (!total) return 0;
-  return (part / total) * 100;
-}
-
 function parseAmount(value) {
   const cleaned = String(value || "").replace(/[,₹\s]/g, "");
   const amt = Number(cleaned);
@@ -157,7 +197,6 @@ function commandBody(text) {
 }
 
 function parseFundAndAmount(text) {
-  // expected: /add hdfc flexi cap | 5000
   const body = commandBody(text);
   const parts = body.split("|");
   if (parts.length < 2) return null;
@@ -167,6 +206,22 @@ function parseFundAndAmount(text) {
 
   if (!fundName || !amount) return null;
   return { fundName, amount };
+}
+
+function parseSipCommand(text) {
+  // /sip hdfc flexi cap | 5000 | monthly
+  const body = commandBody(text);
+  const parts = body.split("|").map((x) => x.trim()).filter(Boolean);
+  if (parts.length < 3) return null;
+
+  const fundName = parts[0];
+  const amount = parseAmount(parts[1]);
+  const frequency = String(parts[2] || "").toLowerCase();
+
+  if (!fundName || !amount) return null;
+  if (!["monthly"].includes(frequency)) return null;
+
+  return { fundName, amount, frequency };
 }
 
 async function sendTelegramMessage(chatId, text, extra = {}) {
@@ -218,6 +273,11 @@ function scoreMatch(inputNorm, schemeNorm) {
   return common;
 }
 
+function isTableMissingError(error) {
+  const msg = String(error?.message || "").toLowerCase();
+  return msg.includes("could not find the table") || msg.includes("relation") && msg.includes("does not exist");
+}
+
 // =======================
 // AMFI NAV FETCH
 // =======================
@@ -243,8 +303,6 @@ async function refreshNavCache(force = false) {
   const all = [];
 
   for (const line of lines) {
-    // Typical scheme line:
-    // Scheme Code;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date
     const parts = line.split(";");
     if (parts.length < 6) continue;
 
@@ -285,7 +343,6 @@ async function resolveSchemeByName(fundName) {
   }
 
   if (best && bestScore >= 2) return best;
-
   return null;
 }
 
@@ -391,6 +448,176 @@ async function getDistinctChatIds() {
 }
 
 // =======================
+// SIP HELPERS
+// =======================
+async function getUserSips(chatId) {
+  const { data, error } = await supabase
+    .from(SIPS_TABLE)
+    .select("*")
+    .eq(USER_COL, String(chatId))
+    .eq("is_active", true)
+    .order("next_due_date", { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function findSip(chatId, userTypedFundName) {
+  const rows = await getUserSips(chatId);
+  if (!rows.length) return null;
+
+  const inputNorm = normalizeText(userTypedFundName);
+  let best = null;
+  let bestScore = -1;
+
+  for (const row of rows) {
+    const name = row[FUND_NAME_COL] || "";
+    const dbNorm = normalizeText(name);
+    const score = scoreMatch(inputNorm, dbNorm);
+    if (score > bestScore) {
+      bestScore = score;
+      best = row;
+    }
+  }
+
+  if (best && bestScore >= 2) return best;
+  return null;
+}
+
+async function createOrUpdateSip(chatId, fundName, amount, frequency) {
+  const scheme = await resolveSchemeByName(fundName);
+  if (!scheme) {
+    return {
+      ok: false,
+      message:
+        `❌ Fund not found for SIP: <b>${escapeHtml(fundName)}</b>\n\n` +
+        `Use format:\n<code>/sip hdfc flexi cap | 5000 | monthly</code>`,
+    };
+  }
+
+  let existing = null;
+  try {
+    existing = await findSip(chatId, fundName);
+  } catch (error) {
+    if (isTableMissingError(error)) {
+      return {
+        ok: false,
+        message:
+          `❌ SIP table not found.\n\n` +
+          `Create table <b>${escapeHtml(SIPS_TABLE)}</b> in Supabase first.`,
+      };
+    }
+    throw error;
+  }
+
+  const payload = {
+    [USER_COL]: String(chatId),
+    [FUND_NAME_COL]: scheme.name,
+    amount: round2(amount),
+    frequency,
+    [SCHEME_CODE_COL]: scheme.code,
+    is_active: true,
+    next_due_date: existing?.next_due_date || todayYmd(),
+    updated_at: nowIso(),
+  };
+
+  if (existing && existing.id) {
+    const { error } = await supabase
+      .from(SIPS_TABLE)
+      .update(payload)
+      .eq("id", existing.id);
+
+    if (error) throw error;
+
+    return {
+      ok: true,
+      message:
+        `✅ <b>SIP updated</b>\n\n` +
+        `📌 Fund: <b>${escapeHtml(scheme.name)}</b>\n` +
+        `💰 Amount: <b>${formatINR(amount)}</b>\n` +
+        `🔁 Frequency: <b>${escapeHtml(frequency)}</b>\n` +
+        `📅 Next Due: <b>${escapeHtml(formatDisplayDate(payload.next_due_date))}</b>`,
+    };
+  }
+
+  payload.created_at = nowIso();
+
+  const { error } = await supabase.from(SIPS_TABLE).insert(payload);
+  if (error) throw error;
+
+  return {
+    ok: true,
+    message:
+      `✅ <b>SIP created</b>\n\n` +
+      `📌 Fund: <b>${escapeHtml(scheme.name)}</b>\n` +
+      `💰 Amount: <b>${formatINR(amount)}</b>\n` +
+      `🔁 Frequency: <b>${escapeHtml(frequency)}</b>\n` +
+      `📅 Next Due: <b>${escapeHtml(formatDisplayDate(payload.next_due_date))}</b>`,
+  };
+}
+
+async function buildSipsText(chatId) {
+  let rows;
+  try {
+    rows = await getUserSips(chatId);
+  } catch (error) {
+    if (isTableMissingError(error)) {
+      return (
+        `❌ <b>SIP table not found.</b>\n\n` +
+        `Create this table in Supabase: <code>${escapeHtml(SIPS_TABLE)}</code>`
+      );
+    }
+    throw error;
+  }
+
+  if (!rows.length) {
+    return (
+      `📭 <b>No active SIPs found.</b>\n\n` +
+      `Use:\n<code>/sip hdfc flexi cap | 5000 | monthly</code>`
+    );
+  }
+
+  let totalMonthly = 0;
+  const lines = [];
+
+  for (const row of rows) {
+    const amount = Number(row.amount || 0);
+    totalMonthly += amount;
+
+    lines.push(
+      `• <b>${escapeHtml(row[FUND_NAME_COL] || "Unknown Fund")}</b>\n` +
+      `  Amount: <b>${formatINR(amount)}</b>\n` +
+      `  Frequency: <b>${escapeHtml(row.frequency || "monthly")}</b>\n` +
+      `  Next Due: <b>${escapeHtml(formatDisplayDate(row.next_due_date))}</b>`
+    );
+  }
+
+  return (
+    `🔁 <b>Your SIPs</b>\n\n` +
+    lines.join("\n\n") +
+    `\n\n────────────\n` +
+    `💸 Total Monthly SIP: <b>${formatINR(totalMonthly)}</b>`
+  );
+}
+
+async function getSipDigest(chatId) {
+  try {
+    const rows = await getUserSips(chatId);
+    if (!rows.length) return "";
+    const totalMonthly = rows.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+    const nextDue = rows[0]?.next_due_date ? formatDisplayDate(rows[0].next_due_date) : "-";
+    return (
+      `\n\n🔁 <b>Active SIPs:</b> ${rows.length}` +
+      `\n💸 <b>Total Monthly SIP:</b> ${formatINR(totalMonthly)}` +
+      `\n📅 <b>Next SIP Due:</b> ${escapeHtml(nextDue)}`
+    );
+  } catch (error) {
+    if (isTableMissingError(error)) return "";
+    throw error;
+  }
+}
+
+// =======================
 // CORE ACTIONS
 // =======================
 async function addFund(chatId, fundName, amount) {
@@ -398,7 +625,7 @@ async function addFund(chatId, fundName, amount) {
   if (!scheme) {
     return {
       ok: false,
-      message: `❌ Fund not found for: <b>${escapeHtml(fundName)}</b>\n\nTry a cleaner name like:\n<code>/add hdfc flexi cap | 5000</code>`,
+      message: `❌ Fund not found for: <b>${escapeHtml(fundName)}</b>\n\nTry:\n<code>/add hdfc flexi cap | 5000</code>`,
     };
   }
 
@@ -642,6 +869,7 @@ async function buildSummary(chatId, compact = false) {
 
   const totalProfit = totalCurrent - totalInvested;
   const totalPct = totalInvested > 0 ? (totalProfit / totalInvested) * 100 : 0;
+  const sipDigest = await getSipDigest(chatId);
 
   if (compact) {
     return (
@@ -650,7 +878,8 @@ async function buildSummary(chatId, compact = false) {
       `📈 Value: <b>${formatINR(totalCurrent)}</b>\n` +
       `📊 P/L: <b>${formatINR(totalProfit)} (${totalPct.toFixed(2)}%)</b>\n\n` +
       `🏆 Best: <b>${escapeHtml(best.fundName)}</b> (${best.returnPct.toFixed(2)}%)\n` +
-      `⚠️ Worst: <b>${escapeHtml(worst.fundName)}</b> (${worst.returnPct.toFixed(2)}%)`
+      `⚠️ Worst: <b>${escapeHtml(worst.fundName)}</b> (${worst.returnPct.toFixed(2)}%)` +
+      sipDigest
     );
   }
 
@@ -662,7 +891,8 @@ async function buildSummary(chatId, compact = false) {
     `🏆 Top Performing Fund:\n` +
     `<b>${escapeHtml(best.fundName)}</b> — ${best.returnPct.toFixed(2)}%\n\n` +
     `⚠️ Worst Performing Fund:\n` +
-    `<b>${escapeHtml(worst.fundName)}</b> — ${worst.returnPct.toFixed(2)}%`
+    `<b>${escapeHtml(worst.fundName)}</b> — ${worst.returnPct.toFixed(2)}%` +
+    sipDigest
   );
 }
 
@@ -682,6 +912,8 @@ async function handleTextMessage(chatId, text) {
           `<code>/sell hdfc flexi cap | 2000</code>\n` +
           `<code>/portfolio</code>\n` +
           `<code>/summary</code>\n` +
+          `<code>/sip hdfc flexi cap | 5000 | monthly</code>\n` +
+          `<code>/sips</code>\n` +
           `<code>/help</code>`
       );
       return;
@@ -694,7 +926,9 @@ async function handleTextMessage(chatId, text) {
           `1. Buy:\n<code>/add hdfc flexi cap | 5000</code>\n\n` +
           `2. Sell:\n<code>/sell hdfc flexi cap | 2000</code>\n\n` +
           `3. View holdings:\n<code>/portfolio</code>\n\n` +
-          `4. Summary:\n<code>/summary</code>`
+          `4. Summary:\n<code>/summary</code>\n\n` +
+          `5. Create or update SIP:\n<code>/sip hdfc flexi cap | 5000 | monthly</code>\n\n` +
+          `6. View SIPs:\n<code>/sips</code>`
       );
       return;
     }
@@ -737,6 +971,27 @@ async function handleTextMessage(chatId, text) {
 
     if (lower === "/summary") {
       const message = await buildSummary(chatId, false);
+      await sendTelegramMessage(chatId, message);
+      return;
+    }
+
+    if (lower.startsWith("/sip ")) {
+      const parsed = parseSipCommand(text);
+      if (!parsed) {
+        await sendTelegramMessage(
+          chatId,
+          `❌ Invalid SIP format.\n\nUse:\n<code>/sip hdfc flexi cap | 5000 | monthly</code>`
+        );
+        return;
+      }
+
+      const result = await createOrUpdateSip(chatId, parsed.fundName, parsed.amount, parsed.frequency);
+      await sendTelegramMessage(chatId, result.message);
+      return;
+    }
+
+    if (lower === "/sips") {
+      const message = await buildSipsText(chatId);
       await sendTelegramMessage(chatId, message);
       return;
     }
@@ -802,8 +1057,6 @@ app.get("/refresh-nav", async (_req, res) => {
   }
 });
 
-// Manual test:
-// https://your-railway-url/cron/summary?token=YOUR_CRON_SECRET
 app.get("/cron/summary", async (req, res) => {
   try {
     const token = String(req.query.token || "");
@@ -844,8 +1097,80 @@ app.get("/cron/summary", async (req, res) => {
   }
 });
 
-// Optional test endpoint:
-// /test-send?chat_id=123&msg=hello
+// Optional endpoint to auto-log due SIPs into holdings.
+// Call manually or on a schedule: /cron/run-sips?token=YOUR_CRON_SECRET
+app.get("/cron/run-sips", async (req, res) => {
+  try {
+    const token = String(req.query.token || "");
+    if (token !== CRON_SECRET) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const today = todayYmd();
+    const { data: dueRows, error } = await supabase
+      .from(SIPS_TABLE)
+      .select("*")
+      .eq("is_active", true)
+      .lte("next_due_date", today);
+
+    if (error) {
+      throw error;
+    }
+
+    let processed = 0;
+    let failed = 0;
+
+    for (const row of dueRows || []) {
+      try {
+        const chatId = row[USER_COL];
+        const fundName = row[FUND_NAME_COL];
+        const amount = Number(row.amount || 0);
+        const frequency = String(row.frequency || "monthly").toLowerCase();
+
+        const out = await addFund(chatId, fundName, amount);
+        if (!out.ok) throw new Error(out.message);
+
+        const nextDue = frequency === "monthly" ? addMonthsToYmd(row.next_due_date || today, 1) : today;
+
+        const { error: updateError } = await supabase
+          .from(SIPS_TABLE)
+          .update({
+            last_run_date: today,
+            next_due_date: nextDue,
+            updated_at: nowIso(),
+          })
+          .eq("id", row.id);
+
+        if (updateError) throw updateError;
+
+        await sendTelegramMessage(
+          chatId,
+          `🔁 <b>SIP executed</b>\n\n` +
+            `📌 Fund: <b>${escapeHtml(fundName)}</b>\n` +
+            `💰 Amount: <b>${formatINR(amount)}</b>\n` +
+            `📅 Next Due: <b>${escapeHtml(formatDisplayDate(nextDue))}</b>`
+        );
+
+        processed++;
+      } catch (e) {
+        console.error("SIP run failed:", e.message);
+        failed++;
+      }
+    }
+
+    res.json({
+      ok: true,
+      today,
+      totalDue: (dueRows || []).length,
+      processed,
+      failed,
+    });
+  } catch (err) {
+    console.error("/cron/run-sips error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/test-send", async (req, res) => {
   try {
     const chatId = req.query.chat_id;
