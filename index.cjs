@@ -63,6 +63,50 @@ app.use(express.json({ limit: "1mb" }));
 const navCache = { lastFetchMs: 0, byCode: new Map(), all: [] };
 const NAV_CACHE_TTL_MS = 1000 * 60 * 60 * 6;
 
+const MAIN_MENU_KEYBOARD = {
+  keyboard: [
+    [{ text: "📊 Quick Investment Check" }],
+    [{ text: "🚀 Start SIP" }],
+    [{ text: "💬 Get Free Advice" }],
+    [{ text: "📁 My Portfolio" }, { text: "📊 My Summary" }],
+  ],
+  resize_keyboard: true,
+};
+
+const INVESTMENT_CHECK_KEYBOARD = {
+  keyboard: [
+    [{ text: "Less than ₹1 lakh" }],
+    [{ text: "₹1-5 lakh" }],
+    [{ text: "₹5-20 lakh" }],
+    [{ text: "More than ₹20 lakh" }],
+    [{ text: "⬅️ Back to Menu" }],
+  ],
+  resize_keyboard: true,
+};
+
+const SIP_STARTER_KEYBOARD = {
+  keyboard: [
+    [{ text: "₹2,000/month" }],
+    [{ text: "₹5,000/month" }],
+    [{ text: "₹10,000/month" }],
+    [{ text: "₹25,000+/month" }],
+    [{ text: "⬅️ Back to Menu" }],
+  ],
+  resize_keyboard: true,
+};
+
+const ADVICE_KEYBOARD = {
+  keyboard: [
+    [{ text: "Tax Saving Help" }],
+    [{ text: "Portfolio Review" }],
+    [{ text: "Best SIP Options" }],
+    [{ text: "Lumpsum Investment Help" }],
+    [{ text: "⬅️ Back to Menu" }],
+  ],
+  resize_keyboard: true,
+};
+
+
 // =======================
 // HELPERS
 // =======================
@@ -264,6 +308,34 @@ async function setWebhookFromRailwayUrl(baseUrl) {
 
   const data = await resp.json().catch(() => ({}));
   console.log("setWebhook response:", data);
+}
+
+async function sendMainMenu(chatId, text = "Choose an option to continue:") {
+  return sendTelegramMessage(chatId, text, { reply_markup: MAIN_MENU_KEYBOARD });
+}
+
+async function sendInvestmentCheckMenu(chatId) {
+  return sendTelegramMessage(
+    chatId,
+    "How much have you invested in mutual funds?",
+    { reply_markup: INVESTMENT_CHECK_KEYBOARD }
+  );
+}
+
+async function sendSipStarterMenu(chatId) {
+  return sendTelegramMessage(
+    chatId,
+    "What SIP size are you thinking of starting?",
+    { reply_markup: SIP_STARTER_KEYBOARD }
+  );
+}
+
+async function sendAdviceMenu(chatId) {
+  return sendTelegramMessage(
+    chatId,
+    "What kind of help do you want right now?",
+    { reply_markup: ADVICE_KEYBOARD }
+  );
 }
 
 // =======================
@@ -733,7 +805,7 @@ async function getPortfolioSnapshot(chatId) {
 // =======================
 // WHATSAPP ALERT
 // =======================
-async function sendWhatsAppLeadAlert({ chatId, name, city, mobile, email }) {
+async function sendWhatsAppLeadAlert({ chatId, name, city, mobile, email, actionLabel = "Portfolio review interest captured", note = "" }) {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !WHATSAPP_FROM || !WHATSAPP_TO) {
     console.warn("WhatsApp alert skipped: missing Twilio/WhatsApp env vars");
     return { ok: false, skipped: true };
@@ -757,7 +829,8 @@ async function sendWhatsAppLeadAlert({ chatId, name, city, mobile, email }) {
     `Top Fund: ${portfolio.topFund?.fundName || "N/A"}\n\n` +
     `SIPs: ${sip.count}\n` +
     `Monthly SIP: ${formatINR(sip.totalMonthly)}\n\n` +
-    `Action: Portfolio review interest captured\n` +
+    `Action: ${actionLabel}\n` +
+    `Details: ${note || "N/A"}\n` +
     `Time: ${leadTime}\n` +
     `Call this lead now.`;
 
@@ -787,7 +860,7 @@ async function sendWhatsAppLeadAlert({ chatId, name, city, mobile, email }) {
   return { ok: true, sid: data.sid };
 }
 
-async function sendAutoLeadAlert(chatId, actionLabel) {
+async function sendAutoLeadAlert(chatId, actionLabel, note = "") {
   await markLead(chatId);
   const user = await getBotUser(chatId);
   const result = await sendWhatsAppLeadAlert({
@@ -796,6 +869,8 @@ async function sendAutoLeadAlert(chatId, actionLabel) {
     city: user?.city,
     mobile: user?.mobile,
     email: user?.email,
+    actionLabel,
+    note,
   });
   console.log(`AUTO LEAD ALERT (${actionLabel}):`, chatId, result?.ok ? "sent" : "skipped");
   return result;
@@ -1084,7 +1159,7 @@ async function handleTextMessage(chatId, text) {
 
   try {
     if (lower === "yes") {
-      await sendAutoLeadAlert(chatId, "yes");
+      await sendAutoLeadAlert(chatId, "YES reply", "User replied YES for portfolio review");
       await sendTelegramMessage(
         chatId,
         `🔥 <b>Great!</b>\n\nOur expert will connect with you shortly for portfolio review.`
@@ -1094,18 +1169,12 @@ async function handleTextMessage(chatId, text) {
     }
 
     if (lower === "/start") {
-      await sendTelegramMessage(
+      await sendMainMenu(
         chatId,
         `👋 <b>Mutual Fund Bot Ready</b>\n\n` +
-        `Commands:\n` +
-        `<code>/add hdfc flexi cap | 5000</code>\n` +
-        `<code>/sell hdfc flexi cap | 2000</code>\n` +
-        `<code>/portfolio</code>\n` +
-        `<code>/summary</code>\n` +
-        `<code>/sip hdfc flexi cap | 5000 | monthly</code>\n` +
-        `<code>/sips</code>\n` +
-        `<code>/register Rahul | Delhi | 8882332050 | rahul23jain@gmail.com</code>\n` +
-        `<code>/help</code>`
+        `Use the buttons below for quick leads or use commands anytime.\n\n` +
+        `Register first for better lead alerts:\n` +
+        `<code>/register Rahul | Delhi | 8882332050 | rahul23jain@gmail.com</code>`
       );
       return;
     }
@@ -1114,6 +1183,11 @@ async function handleTextMessage(chatId, text) {
       await sendTelegramMessage(
         chatId,
         `🛠 <b>Available Commands</b>\n\n` +
+        `Quick lead buttons:\n` +
+        `• 📊 Quick Investment Check\n` +
+        `• 🚀 Start SIP\n` +
+        `• 💬 Get Free Advice\n\n` +
+        `Commands:\n` +
         `1. Buy:\n<code>/add hdfc flexi cap | 5000</code>\n\n` +
         `2. Sell:\n<code>/sell hdfc flexi cap | 2000</code>\n\n` +
         `3. View holdings:\n<code>/portfolio</code>\n\n` +
@@ -1122,6 +1196,73 @@ async function handleTextMessage(chatId, text) {
         `6. View SIPs:\n<code>/sips</code>\n\n` +
         `7. Register yourself:\n<code>/register Rahul | Delhi | 8882332050 | rahul23jain@gmail.com</code>`
       );
+      return;
+    }
+
+
+    if (lower === "⬅️ back to menu".toLowerCase()) {
+      await sendMainMenu(chatId);
+      return;
+    }
+
+    if (normalized === "📊 Quick Investment Check") {
+      await sendInvestmentCheckMenu(chatId);
+      return;
+    }
+
+    if (normalized === "🚀 Start SIP") {
+      await sendSipStarterMenu(chatId);
+      return;
+    }
+
+    if (normalized === "💬 Get Free Advice") {
+      await sendAdviceMenu(chatId);
+      return;
+    }
+
+    if (normalized === "📁 My Portfolio") {
+      await sendTelegramMessage(chatId, await buildPortfolioText(chatId), { reply_markup: MAIN_MENU_KEYBOARD });
+      return;
+    }
+
+    if (normalized === "📊 My Summary") {
+      await sendTelegramMessage(chatId, await buildSummary(chatId, false), { reply_markup: MAIN_MENU_KEYBOARD });
+      await sendAutoLeadAlert(chatId, "Summary viewed", "User opened summary from quick menu");
+      return;
+    }
+
+    if (["Less than ₹1 lakh", "₹1-5 lakh", "₹5-20 lakh", "More than ₹20 lakh"].includes(normalized)) {
+      await sendAutoLeadAlert(chatId, "Quick Investment Check", normalized);
+      await sendTelegramMessage(
+        chatId,
+        `✅ Noted: <b>${escapeHtml(normalized)}</b>\n\nOur expert will connect with you shortly.`,
+        { reply_markup: MAIN_MENU_KEYBOARD }
+      );
+      return;
+    }
+
+    if (["₹2,000/month", "₹5,000/month", "₹10,000/month", "₹25,000+/month"].includes(normalized)) {
+      await sendAutoLeadAlert(chatId, "SIP Starter Interest", normalized);
+      await sendTelegramMessage(
+        chatId,
+        `✅ Noted: <b>${escapeHtml(normalized)}</b>\n\nWe will help you start the right SIP plan.`,
+        { reply_markup: MAIN_MENU_KEYBOARD }
+      );
+      return;
+    }
+
+    if (["Tax Saving Help", "Portfolio Review", "Best SIP Options", "Lumpsum Investment Help"].includes(normalized)) {
+      await sendAutoLeadAlert(chatId, "Free Advice Request", normalized);
+      await sendTelegramMessage(
+        chatId,
+        `✅ Noted: <b>${escapeHtml(normalized)}</b>\n\nOur expert will connect with you shortly.`,
+        { reply_markup: MAIN_MENU_KEYBOARD }
+      );
+      return;
+    }
+
+    if (lower === "/quicklead") {
+      await sendMainMenu(chatId, "Choose a quick lead option below:");
       return;
     }
 
@@ -1177,13 +1318,13 @@ async function handleTextMessage(chatId, text) {
     }
 
     if (lower === "/portfolio") {
-      await sendTelegramMessage(chatId, await buildPortfolioText(chatId));
+      await sendTelegramMessage(chatId, await buildPortfolioText(chatId), { reply_markup: MAIN_MENU_KEYBOARD });
       return;
     }
 
     if (lower === "/summary") {
-      await sendTelegramMessage(chatId, await buildSummary(chatId, false));
-      await sendAutoLeadAlert(chatId, "summary");
+      await sendTelegramMessage(chatId, await buildSummary(chatId, false), { reply_markup: MAIN_MENU_KEYBOARD });
+      await sendAutoLeadAlert(chatId, "Summary viewed", "User opened summary command");
       return;
     }
 
@@ -1208,13 +1349,14 @@ async function handleTextMessage(chatId, text) {
     }
 
     if (lower === "/sips") {
-      await sendTelegramMessage(chatId, await buildSipsText(chatId));
+      await sendTelegramMessage(chatId, await buildSipsText(chatId), { reply_markup: MAIN_MENU_KEYBOARD });
       return;
     }
 
     await sendTelegramMessage(
       chatId,
-      `❓ Unknown command.\n\nUse <code>/help</code> to see all commands.`
+      `❓ Unknown command.\n\nUse <code>/help</code> to see all commands or use the menu below.`,
+      { reply_markup: MAIN_MENU_KEYBOARD }
     );
   } catch (err) {
     console.error("handleTextMessage error:", err);
