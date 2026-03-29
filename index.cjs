@@ -27,6 +27,10 @@ const HOLDINGS_TABLE = process.env.HOLDINGS_TABLE || "holdings";
 const TRANSACTIONS_TABLE = process.env.TRANSACTIONS_TABLE || "transactions";
 const SIPS_TABLE = process.env.SIPS_TABLE || "sip_plans";
 const USERS_TABLE = process.env.USERS_TABLE || "bot_users";
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const WHATSAPP_FROM = process.env.WHATSAPP_FROM;
+const WHATSAPP_TO = process.env.WHATSAPP_TO;
 
 const USER_COL = process.env.USER_COL || "chat_id";
 const FUND_NAME_COL = process.env.FUND_NAME_COL || "fund_name";
@@ -281,6 +285,60 @@ async function markLead(chatId) {
   }
 }
 
+async function getBotUser(chatId) {
+  try {
+    const { data, error } = await supabase
+      .from(USERS_TABLE)
+      .select("*")
+      .eq("chat_id", String(chatId))
+      .maybeSingle();
+    if (error) throw error;
+    return data || null;
+  } catch (error) {
+    if (isTableMissingError(error)) return null;
+    throw error;
+  }
+}
+
+async function sendWhatsAppLeadAlert({ chatId, name, city }) {
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !WHATSAPP_FROM || !WHATSAPP_TO) {
+    console.warn("WhatsApp alert skipped: missing Twilio/WhatsApp env vars");
+    return { ok: false, skipped: true };
+  }
+
+  const body =
+    `🔥 New MF Lead\n` +
+    `Chat ID: ${chatId}\n` +
+    `Name: ${name || "Not provided"}\n` +
+    `City: ${city || "Not provided"}\n` +
+    `Action: Replied YES for portfolio review`;
+
+  const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+  const form = new URLSearchParams();
+  form.append("From", WHATSAPP_FROM);
+  form.append("To", WHATSAPP_TO);
+  form.append("Body", body);
+
+  const resp = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+    }
+  );
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error("Twilio WhatsApp send failed:", data);
+    return { ok: false, error: data };
+  }
+  return { ok: true, sid: data.sid };
+}
+
 async function getUserSips(chatId) {
   const { data, error } = await supabase.from(SIPS_TABLE).select("*").eq(USER_COL, String(chatId)).eq("is_active", true).order("next_due_date", { ascending: true });
   if (error) throw error;
@@ -523,6 +581,12 @@ async function handleTextMessage(chatId, text) {
   try {
     if (lower === "yes") {
       await markLead(chatId);
+      const user = await getBotUser(chatId);
+      await sendWhatsAppLeadAlert({
+        chatId,
+        name: user?.name,
+        city: user?.city,
+      });
       await sendTelegramMessage(chatId, `🔥 <b>Great!</b>\n\nOur expert will connect with you shortly for portfolio review.`);
       console.log("NEW LEAD:", chatId);
       return;
