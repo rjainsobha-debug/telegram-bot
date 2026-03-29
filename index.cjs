@@ -239,10 +239,6 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
     ...extra,
   };
 
-  if (payload.reply_markup) {
-    payload.reply_markup = JSON.stringify(payload.reply_markup);
-  }
-
   const resp = await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -256,58 +252,203 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
   return data;
 }
 
-function getQuickLeadKeyboard(menu = "main") {
+
+function getQuickLeadInlineKeyboard(menu = "main") {
+  if (menu === "main") {
+    return {
+      inline_keyboard: [
+        [{ text: "📊 Quick Investment Check", callback_data: "ql_investment" }],
+        [{ text: "🚀 Start SIP", callback_data: "ql_sip" }],
+        [{ text: "💬 Get Free Advice", callback_data: "ql_advice" }],
+      ],
+    };
+  }
+
   if (menu === "investment") {
     return {
-      keyboard: [
-        [{ text: "₹0-1 lakh" }, { text: "₹1-5 lakh" }],
-        [{ text: "₹5-20 lakh" }, { text: "₹20 lakh+" }],
-        [{ text: "⬅️ Back to Menu" }],
+      inline_keyboard: [
+        [
+          { text: "₹0-1 lakh", callback_data: "lead_inv_0_1" },
+          { text: "₹1-5 lakh", callback_data: "lead_inv_1_5" },
+        ],
+        [
+          { text: "₹5-20 lakh", callback_data: "lead_inv_5_20" },
+          { text: "₹20 lakh+", callback_data: "lead_inv_20_plus" },
+        ],
+        [{ text: "⬅️ Back", callback_data: "ql_main" }],
       ],
-      resize_keyboard: true,
-      one_time_keyboard: false,
     };
   }
 
   if (menu === "sip") {
     return {
-      keyboard: [
-        [{ text: "₹2,000/month" }, { text: "₹5,000/month" }],
-        [{ text: "₹10,000/month" }, { text: "₹25,000+/month" }],
-        [{ text: "⬅️ Back to Menu" }],
+      inline_keyboard: [
+        [
+          { text: "₹2,000/month", callback_data: "lead_sip_2000" },
+          { text: "₹5,000/month", callback_data: "lead_sip_5000" },
+        ],
+        [
+          { text: "₹10,000/month", callback_data: "lead_sip_10000" },
+          { text: "₹25,000+/month", callback_data: "lead_sip_25000_plus" },
+        ],
+        [{ text: "⬅️ Back", callback_data: "ql_main" }],
       ],
-      resize_keyboard: true,
-      one_time_keyboard: false,
     };
   }
 
   if (menu === "advice") {
     return {
-      keyboard: [
-        [{ text: "Portfolio Review" }, { text: "Tax Saving Help" }],
-        [{ text: "SIP Planning" }, { text: "Talk to Expert" }],
-        [{ text: "⬅️ Back to Menu" }],
+      inline_keyboard: [
+        [
+          { text: "Portfolio Review", callback_data: "lead_adv_portfolio_review" },
+          { text: "Tax Saving Help", callback_data: "lead_adv_tax_saving_help" },
+        ],
+        [
+          { text: "SIP Planning", callback_data: "lead_adv_sip_planning" },
+          { text: "Talk to Expert", callback_data: "lead_adv_talk_to_expert" },
+        ],
+        [{ text: "⬅️ Back", callback_data: "ql_main" }],
       ],
-      resize_keyboard: true,
-      one_time_keyboard: false,
     };
   }
 
-  return {
-    keyboard: [
-      [{ text: "📊 Quick Investment Check" }],
-      [{ text: "🚀 Start SIP" }],
-      [{ text: "💬 Get Free Advice" }],
-      [{ text: "/portfolio" }, { text: "/summary" }],
-    ],
-    resize_keyboard: true,
-    one_time_keyboard: false,
-  };
+  return { inline_keyboard: [] };
 }
 
-function removeKeyboard() {
-  return { remove_keyboard: true };
+function quickLeadChoiceLabel(data) {
+  const map = {
+    lead_inv_0_1: "Quick Investment Check: ₹0-1 lakh",
+    lead_inv_1_5: "Quick Investment Check: ₹1-5 lakh",
+    lead_inv_5_20: "Quick Investment Check: ₹5-20 lakh",
+    lead_inv_20_plus: "Quick Investment Check: ₹20 lakh+",
+    lead_sip_2000: "Start SIP interest: ₹2,000/month",
+    lead_sip_5000: "Start SIP interest: ₹5,000/month",
+    lead_sip_10000: "Start SIP interest: ₹10,000/month",
+    lead_sip_25000_plus: "Start SIP interest: ₹25,000+/month",
+    lead_adv_portfolio_review: "Free Advice request: Portfolio Review",
+    lead_adv_tax_saving_help: "Free Advice request: Tax Saving Help",
+    lead_adv_sip_planning: "Free Advice request: SIP Planning",
+    lead_adv_talk_to_expert: "Free Advice request: Talk to Expert",
+  };
+  return map[data] || null;
 }
+
+async function answerCallbackQuery(callbackQueryId, text = "") {
+  const payload = { callback_query_id: callbackQueryId };
+  if (text) payload.text = text;
+
+  const resp = await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  return await resp.json().catch(() => ({}));
+}
+
+async function editTelegramMessage(chatId, messageId, text, extra = {}) {
+  const payload = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...extra,
+  };
+
+  const resp = await fetch(`${TELEGRAM_API}/editMessageText`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || !data.ok) {
+    console.error("Telegram editMessageText error:", data);
+  }
+  return data;
+}
+
+async function sendAutoLeadAlert(chatId, actionLabel) {
+  await markLead(chatId);
+  const user = await getBotUser(chatId);
+  const result = await sendWhatsAppLeadAlert({
+    chatId,
+    name: user?.name,
+    city: user?.city,
+    mobile: user?.mobile,
+    email: user?.email,
+    actionLabel,
+  });
+  console.log(`AUTO LEAD ALERT (${actionLabel}):`, chatId, result?.ok ? "sent" : "skipped");
+  return result;
+}
+
+async function handleCallbackQuery(callbackQuery) {
+  const data = callbackQuery?.data || "";
+  const callbackQueryId = callbackQuery?.id;
+  const chatId = callbackQuery?.message?.chat?.id;
+  const messageId = callbackQuery?.message?.message_id;
+
+  if (!chatId || !messageId) return;
+  await answerCallbackQuery(callbackQueryId);
+
+  if (data === "ql_main") {
+    await editTelegramMessage(
+      chatId,
+      messageId,
+      `Choose a quick lead option below:`,
+      { reply_markup: getQuickLeadInlineKeyboard("main") }
+    );
+    return;
+  }
+
+  if (data === "ql_investment") {
+    await editTelegramMessage(
+      chatId,
+      messageId,
+      `Select your approximate mutual fund investment:`,
+      { reply_markup: getQuickLeadInlineKeyboard("investment") }
+    );
+    return;
+  }
+
+  if (data === "ql_sip") {
+    await editTelegramMessage(
+      chatId,
+      messageId,
+      `Select the SIP amount you are considering:`,
+      { reply_markup: getQuickLeadInlineKeyboard("sip") }
+    );
+    return;
+  }
+
+  if (data === "ql_advice") {
+    await editTelegramMessage(
+      chatId,
+      messageId,
+      `Choose what you want help with:`,
+      { reply_markup: getQuickLeadInlineKeyboard("advice") }
+    );
+    return;
+  }
+
+  const label = quickLeadChoiceLabel(data);
+  if (label) {
+    await sendAutoLeadAlert(chatId, label);
+    await editTelegramMessage(
+      chatId,
+      messageId,
+      `✅ <b>Request captured</b>
+
+<b>${escapeHtml(label)}</b>
+
+Our expert will connect with you shortly.`,
+      { reply_markup: getQuickLeadInlineKeyboard("main") }
+    );
+  }
+}
+
 
 async function setWebhookFromRailwayUrl(baseUrl) {
   if (!baseUrl) return;
@@ -1127,18 +1268,7 @@ async function handleTextMessage(chatId, text) {
 
   try {
     if (lower === "yes") {
-      await markLead(chatId);
-
-      const user = await getBotUser(chatId);
-      await sendWhatsAppLeadAlert({
-        chatId,
-        name: user?.name,
-        city: user?.city,
-        mobile: user?.mobile,
-        email: user?.email,
-        actionLabel: "Replied YES for portfolio review",
-      });
-
+      await sendAutoLeadAlert(chatId, "Replied YES for portfolio review");
       await sendTelegramMessage(
         chatId,
         `🔥 <b>Great!</b>\n\nOur expert will connect with you shortly for portfolio review.`
@@ -1154,7 +1284,7 @@ async function handleTextMessage(chatId, text) {
         `Use the buttons below for quick leads or use commands anytime.\n\n` +
         `Register first for better lead alerts:\n` +
         `<code>/register Rahul | Delhi | 8882332050 | rahul23jain@gmail.com</code>`,
-        { reply_markup: getQuickLeadKeyboard("main") }
+        { reply_markup: getQuickLeadInlineKeyboard("main") }
       );
       return;
     }
@@ -1163,7 +1293,7 @@ async function handleTextMessage(chatId, text) {
       await sendTelegramMessage(
         chatId,
         `Choose a quick lead option below:`,
-        { reply_markup: getQuickLeadKeyboard("main") }
+        { reply_markup: getQuickLeadInlineKeyboard("main") }
       );
       return;
     }
@@ -1180,99 +1310,6 @@ async function handleTextMessage(chatId, text) {
         `6. View SIPs:\n<code>/sips</code>\n\n` +
         `7. Register yourself:\n<code>/register Rahul | Delhi | 8882332050 | rahul23jain@gmail.com</code>\n\n` +
         `8. Quick lead menu:\n<code>/quicklead</code>`
-      );
-      return;
-    }
-
-    if (normalized === "📊 Quick Investment Check") {
-      await sendTelegramMessage(
-        chatId,
-        `Select your approximate mutual fund investment:`,
-        { reply_markup: getQuickLeadKeyboard("investment") }
-      );
-      return;
-    }
-
-    if (normalized === "🚀 Start SIP") {
-      await sendTelegramMessage(
-        chatId,
-        `Select the SIP amount you are considering:`,
-        { reply_markup: getQuickLeadKeyboard("sip") }
-      );
-      return;
-    }
-
-    if (normalized === "💬 Get Free Advice") {
-      await sendTelegramMessage(
-        chatId,
-        `Choose what you want help with:`,
-        { reply_markup: getQuickLeadKeyboard("advice") }
-      );
-      return;
-    }
-
-    if (normalized === "⬅️ Back to Menu") {
-      await sendTelegramMessage(
-        chatId,
-        `Choose a quick lead option below:`,
-        { reply_markup: getQuickLeadKeyboard("main") }
-      );
-      return;
-    }
-
-    if (["₹0-1 lakh", "₹1-5 lakh", "₹5-20 lakh", "₹20 lakh+"].includes(normalized)) {
-      const user = await getBotUser(chatId);
-      await markLead(chatId);
-      await sendWhatsAppLeadAlert({
-        chatId,
-        name: user?.name,
-        city: user?.city,
-        mobile: user?.mobile,
-        email: user?.email,
-        actionLabel: `Quick Investment Check: ${normalized}`,
-      });
-      await sendTelegramMessage(
-        chatId,
-        `✅ Noted: <b>${escapeHtml(normalized)}</b> invested range. Our expert will connect with you shortly.`,
-        { reply_markup: getQuickLeadKeyboard("main") }
-      );
-      return;
-    }
-
-    if (["₹2,000/month", "₹5,000/month", "₹10,000/month", "₹25,000+/month"].includes(normalized)) {
-      const user = await getBotUser(chatId);
-      await markLead(chatId);
-      await sendWhatsAppLeadAlert({
-        chatId,
-        name: user?.name,
-        city: user?.city,
-        mobile: user?.mobile,
-        email: user?.email,
-        actionLabel: `Start SIP interest: ${normalized}`,
-      });
-      await sendTelegramMessage(
-        chatId,
-        `✅ Great choice: <b>${escapeHtml(normalized)}</b>. Our expert will connect with you shortly.`,
-        { reply_markup: getQuickLeadKeyboard("main") }
-      );
-      return;
-    }
-
-    if (["Portfolio Review", "Tax Saving Help", "SIP Planning", "Talk to Expert"].includes(normalized)) {
-      const user = await getBotUser(chatId);
-      await markLead(chatId);
-      await sendWhatsAppLeadAlert({
-        chatId,
-        name: user?.name,
-        city: user?.city,
-        mobile: user?.mobile,
-        email: user?.email,
-        actionLabel: `Free Advice request: ${normalized}`,
-      });
-      await sendTelegramMessage(
-        chatId,
-        `✅ Request captured: <b>${escapeHtml(normalized)}</b>. Our expert will connect with you shortly.`,
-        { reply_markup: getQuickLeadKeyboard("main") }
       );
       return;
     }
@@ -1335,6 +1372,7 @@ async function handleTextMessage(chatId, text) {
 
     if (lower === "/summary") {
       await sendTelegramMessage(chatId, await buildSummary(chatId, false));
+      await sendAutoLeadAlert(chatId, "Viewed /summary");
       return;
     }
 
@@ -1384,6 +1422,12 @@ app.post(WEBHOOK_PATH, async (req, res) => {
 
   try {
     const update = req.body || {};
+
+    if (update.callback_query) {
+      await handleCallbackQuery(update.callback_query);
+      return;
+    }
+
     const message = update.message || update.edited_message;
     if (!message || !message.chat || !message.text) return;
 
