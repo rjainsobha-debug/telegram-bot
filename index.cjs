@@ -1281,9 +1281,8 @@ async function handleTextMessage(chatId, text) {
       await sendTelegramMessage(
         chatId,
         `👋 <b>Mutual Fund Bot Ready</b>\n\n` +
-        `Use the buttons below for quick leads or use commands anytime.\n\n` +
-        `Register first for better lead alerts:\n` +
-        `<code>/register Rahul | Delhi | 8882332050 | rahul23jain@gmail.com</code>`,
+        `Choose an option below to get started.\n\n` +
+        `💡 Register to get personalized portfolio insights and faster support.`,
         { reply_markup: getQuickLeadInlineKeyboard("main") }
       );
       return;
