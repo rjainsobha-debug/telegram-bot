@@ -300,18 +300,123 @@ async function getBotUser(chatId) {
   }
 }
 
+
+async function getPortfolioSnapshot(chatId) {
+  const holdings = await getUserHoldings(chatId);
+  if (!holdings.length) {
+    return {
+      totalInvested: 0,
+      totalCurrent: 0,
+      totalProfit: 0,
+      totalPct: 0,
+      topFund: null,
+    };
+  }
+
+  await refreshNavCache(false);
+
+  let totalInvested = 0;
+  let totalCurrent = 0;
+  let topFund = null;
+
+  for (const h of holdings) {
+    const scheme = await getSchemeByCodeOrName(h[SCHEME_CODE_COL], h[FUND_NAME_COL]);
+    const fundName = scheme?.name || h[FUND_NAME_COL] || "Unknown Fund";
+    const nav = Number(scheme?.nav || h[LAST_NAV_COL] || 0);
+    const units = Number(h[UNITS_COL] || 0);
+    const invested = Number(h[INVESTED_COL] || 0);
+    const currentValue = units * nav;
+    const profit = currentValue - invested;
+    const returnPct = invested > 0 ? (profit / invested) * 100 : 0;
+
+    totalInvested += invested;
+    totalCurrent += currentValue;
+
+    const item = { fundName, currentValue, invested, profit, returnPct };
+    if (!topFund || item.currentValue > topFund.currentValue) topFund = item;
+  }
+
+  const totalProfit = totalCurrent - totalInvested;
+  const totalPct = totalInvested > 0 ? (totalProfit / totalInvested) * 100 : 0;
+
+  return {
+    totalInvested,
+    totalCurrent,
+    totalProfit,
+    totalPct,
+    topFund,
+  };
+}
+
+async function getSipSnapshot(chatId) {
+  try {
+    const rows = await getUserSips(chatId);
+    const totalMonthly = rows.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+    return {
+      count: rows.length,
+      totalMonthly,
+    };
+  } catch (error) {
+    if (isTableMissingError(error)) {
+      return { count: 0, totalMonthly: 0 };
+    }
+    throw error;
+  }
+}
+
+function formatLeadTimestamp() {
+  return new Date().toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
 async function sendWhatsAppLeadAlert({ chatId, name, city }) {
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !WHATSAPP_FROM || !WHATSAPP_TO) {
     console.warn("WhatsApp alert skipped: missing Twilio/WhatsApp env vars");
     return { ok: false, skipped: true };
   }
 
+  const portfolio = await getPortfolioSnapshot(chatId);
+  const sip = await getSipSnapshot(chatId);
+  const leadTime = formatLeadTimestamp();
+
   const body =
-    `🔥 New MF Lead\n` +
-    `Chat ID: ${chatId}\n` +
-    `Name: ${name || "Not provided"}\n` +
-    `City: ${city || "Not provided"}\n` +
-    `Action: Replied YES for portfolio review`;
+    `🔥 New MF Lead
+
+` +
+    `Name: ${name || "Not provided"}
+` +
+    `City: ${city || "Not provided"}
+` +
+    `Chat ID: ${chatId}
+
+` +
+    `Portfolio:
+` +
+    `Invested: ${formatINR(portfolio.totalInvested)}
+` +
+    `Current Value: ${formatINR(portfolio.totalCurrent)}
+` +
+    `P/L: ${formatINR(portfolio.totalProfit)} (${portfolio.totalPct.toFixed(2)}%)
+` +
+    `Top Fund: ${portfolio.topFund?.fundName || "N/A"}
+
+` +
+    `SIPs: ${sip.count}
+` +
+    `Monthly SIP: ${formatINR(sip.totalMonthly)}
+
+` +
+    `Action: Replied YES for portfolio review
+` +
+    `Time: ${leadTime}
+` +
+    `Call this lead now.`;
 
   const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
   const form = new URLSearchParams();
