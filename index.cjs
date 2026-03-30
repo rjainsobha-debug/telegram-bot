@@ -62,6 +62,7 @@ app.use(express.json({ limit: "1mb" }));
 // =======================
 const navCache = { lastFetchMs: 0, byCode: new Map(), all: [] };
 const NAV_CACHE_TTL_MS = 1000 * 60 * 60 * 6;
+const pendingLeadRequests = new Map();
 
 // =======================
 // HELPERS
@@ -478,7 +479,7 @@ async function handleCallbackQuery(callbackQuery) {
       chatId,
       messageId,
       `Choose a quick lead option below:`,
-      { reply_markup: getQuickLeadInlineKeyboard("main") }
+      { reply_markup: { ...getQuickLeadReplyKeyboard("main"), inline_keyboard: getQuickLeadInlineKeyboard("main").inline_keyboard } }
     );
     return;
   }
@@ -526,6 +527,7 @@ async function handleCallbackQuery(callbackQuery) {
 Our expert will connect with you shortly.`,
       { reply_markup: getQuickLeadInlineKeyboard("main") }
     );
+    await promptForContact(chatId, label);
   }
 }
 
@@ -780,6 +782,133 @@ async function getBotUser(chatId) {
     if (isTableMissingError(error)) return null;
     throw error;
   }
+}
+
+
+async function upsertBotUserFields(chatId, fields = {}) {
+  try {
+    const payload = {
+      chat_id: String(chatId),
+      updated_at: nowIso(),
+      ...fields,
+    };
+
+    const { error } = await supabase
+      .from(USERS_TABLE)
+      .upsert(payload, { onConflict: "chat_id" });
+
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    if (isTableMissingError(error)) return false;
+    throw error;
+  }
+}
+
+function getWhatsAppClickUrl(actionLabel, mobile) {
+  const text = encodeURIComponent(
+    `Hi Rahul, I came from @Mfddelhibot. I need help with: ${actionLabel}${mobile ? ` | My mobile: ${mobile}` : ""}`
+  );
+  return `https://wa.me/918882332050?text=${text}`;
+}
+
+function getContactShareKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "📞 Share Contact", request_contact: true }],
+      [{ text: "Skip for now" }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
+}
+
+async function promptForContact(chatId, actionLabel) {
+  pendingLeadRequests.set(String(chatId), {
+    actionLabel,
+    createdAt: Date.now(),
+  });
+
+  await sendTelegramMessage(
+    chatId,
+    `📞 <b>Almost done</b>
+
+Please share your mobile number so our expert can assist you faster for:
+<b>${escapeHtml(actionLabel)}</b>
+
+Or tap <b>Skip for now</b>.`,
+    {
+      reply_markup: getContactShareKeyboard(),
+    }
+  );
+}
+
+async function handleContactMessage(message) {
+  const chatId = message?.chat?.id;
+  const contact = message?.contact;
+  if (!chatId || !contact) return;
+
+  const pending = pendingLeadRequests.get(String(chatId));
+  const actionLabel = pending?.actionLabel || "Bot lead";
+  const phone = String(contact.phone_number || "").trim();
+  const tgName = [message?.from?.first_name, message?.from?.last_name].filter(Boolean).join(" ").trim();
+
+  await upsertBotUserFields(chatId, {
+    name: tgName || undefined,
+    mobile: phone || undefined,
+    is_lead: true,
+  });
+
+  await sendWhatsAppLeadAlert({
+    chatId,
+    name: tgName || undefined,
+    mobile: phone || undefined,
+    actionLabel: `${actionLabel} | Contact shared`,
+  });
+
+  pendingLeadRequests.delete(String(chatId));
+
+  await sendTelegramMessage(
+    chatId,
+    `✅ <b>Thanks! Contact received</b>
+
+📱 <b>${escapeHtml(phone)}</b>
+
+Our expert will call you shortly. You can also chat instantly on WhatsApp below.`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "💬 Chat on WhatsApp", url: getWhatsAppClickUrl(actionLabel, phone) }],
+          [{ text: "🤖 Open @Mfddelhibot", url: "https://t.me/Mfddelhibot" }],
+        ],
+        remove_keyboard: true,
+      },
+    }
+  );
+}
+
+async function handleSkipForNow(chatId) {
+  const pending = pendingLeadRequests.get(String(chatId));
+  if (!pending) return false;
+
+  const actionLabel = pending.actionLabel;
+  pendingLeadRequests.delete(String(chatId));
+
+  await sendTelegramMessage(
+    chatId,
+    `👍 No problem. We have captured your request for <b>${escapeHtml(actionLabel)}</b>.
+
+You can chat instantly on WhatsApp below or share contact later anytime.`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "💬 Chat on WhatsApp", url: getWhatsAppClickUrl(actionLabel) }],
+          [{ text: "📊 Main Menu", callback_data: "ql_main" }],
+        ],
+      },
+    }
+  );
+  return true;
 }
 
 // =======================
@@ -1432,8 +1561,14 @@ Our expert will connect with you shortly.`,
             },
           }
         );
+        await promptForContact(chatId, label);
         return;
       }
+    }
+
+    if (lower === "skip for now") {
+      const skipped = await handleSkipForNow(chatId);
+      if (skipped) return;
     }
 
     if (lower === "/start") {
@@ -1592,7 +1727,14 @@ app.post(WEBHOOK_PATH, async (req, res) => {
     }
 
     const message = update.message || update.edited_message;
-    if (!message || !message.chat || !message.text) return;
+    if (!message || !message.chat) return;
+
+    if (message.contact) {
+      await handleContactMessage(message);
+      return;
+    }
+
+    if (!message.text) return;
 
     await handleTextMessage(message.chat.id, message.text);
   } catch (err) {
