@@ -849,19 +849,29 @@ async function handleManualPhoneInput(message) {
     chatId,
     name: tgName || undefined,
     mobile: phone || undefined,
-    actionLabel: `${actionLabel} | Manual number shared`,
+    actionLabel,
   });
 
   pendingLeadRequests.delete(String(chatId));
 
   await sendTelegramMessage(
     chatId,
-    `✅ <b>Thanks! We received your number</b>\n\n📱 <b>${escapeHtml(phone)}</b>\n\nOur expert will contact you shortly. You can also chat instantly on WhatsApp below.`,
+    `✅ <b>Thanks! We received your number</b>
+
+📱 <b>${escapeHtml(phone)}</b>
+
+Our expert will contact you shortly. You can also chat instantly on WhatsApp below.`,
+    { reply_markup: { remove_keyboard: true } }
+  );
+
+  await sendTelegramMessage(
+    chatId,
+    `Choose what you want to do next:`,
     {
       reply_markup: {
         inline_keyboard: [
           [{ text: "💬 Chat on WhatsApp", url: getWhatsAppClickUrl(actionLabel, phone) }],
-          [{ text: "🤖 Open @Mfddelhibot", url: "https://t.me/Mfddelhibot" }],
+          [{ text: "🔁 Start Again", callback_data: "ql_main" }],
         ],
       },
     }
@@ -908,7 +918,7 @@ async function handleContactMessage(message) {
 
   const pending = pendingLeadRequests.get(String(chatId));
   const actionLabel = pending?.actionLabel || "Bot lead";
-  const phone = String(contact.phone_number || "").trim();
+  const phone = extractIndianMobile(String(contact.phone_number || "").trim()) || String(contact.phone_number || "").trim();
   const tgName = [message?.from?.first_name, message?.from?.last_name].filter(Boolean).join(" ").trim();
 
   await upsertBotUserFields(chatId, {
@@ -921,25 +931,30 @@ async function handleContactMessage(message) {
     chatId,
     name: tgName || undefined,
     mobile: phone || undefined,
-    actionLabel: `${actionLabel} | Contact shared`,
+    actionLabel,
   });
 
   pendingLeadRequests.delete(String(chatId));
 
   await sendTelegramMessage(
     chatId,
-    `✅ <b>Thanks! Contact received</b>
+    `✅ <b>Thanks! We received your number</b>
 
 📱 <b>${escapeHtml(phone)}</b>
 
-Our expert will call you shortly. You can also chat instantly on WhatsApp below.`,
+Our expert will contact you shortly. You can also chat instantly on WhatsApp below.`,
+    { reply_markup: { remove_keyboard: true } }
+  );
+
+  await sendTelegramMessage(
+    chatId,
+    `Choose what you want to do next:`,
     {
       reply_markup: {
         inline_keyboard: [
           [{ text: "💬 Chat on WhatsApp", url: getWhatsAppClickUrl(actionLabel, phone) }],
-          [{ text: "🤖 Open @Mfddelhibot", url: "https://t.me/Mfddelhibot" }],
+          [{ text: "🔁 Start Again", callback_data: "ql_main" }],
         ],
-        remove_keyboard: true,
       },
     }
   );
@@ -952,16 +967,27 @@ async function handleSkipForNow(chatId) {
   const actionLabel = pending.actionLabel;
   pendingLeadRequests.delete(String(chatId));
 
+  await sendAdminLeadAlert({
+    chatId,
+    actionLabel: `${actionLabel} | Contact skipped`,
+  });
+
   await sendTelegramMessage(
     chatId,
-    `👍 No problem. We have captured your request for <b>${escapeHtml(actionLabel)}</b>.
+    `👍 We have captured your request for <b>${escapeHtml(actionLabel)}</b>.
 
-You can chat instantly on WhatsApp below or share contact later anytime.`,
+For faster response, chat instantly on WhatsApp below or share your number later anytime.`,
+    { reply_markup: { remove_keyboard: true } }
+  );
+
+  await sendTelegramMessage(
+    chatId,
+    `Choose what you want to do next:`,
     {
       reply_markup: {
         inline_keyboard: [
           [{ text: "💬 Chat on WhatsApp", url: getWhatsAppClickUrl(actionLabel) }],
-          [{ text: "📊 Main Menu", callback_data: "ql_main" }],
+          [{ text: "🔁 Start Again", callback_data: "ql_main" }],
         ],
       },
     }
@@ -1601,7 +1627,6 @@ async function handleTextMessage(chatId, text) {
 
       const label = quickLeadChoiceLabel(quickLeadAction);
       if (label) {
-        await sendAutoLeadAlert(chatId, label);
         await sendTelegramMessage(
           chatId,
           `✅ <b>Request captured</b>
@@ -1751,6 +1776,16 @@ Our expert will connect with you shortly.`,
 
     if (lower === "/sips") {
       await sendTelegramMessage(chatId, await buildSipsText(chatId));
+      return;
+    }
+
+    const pendingLead = pendingLeadRequests.get(String(chatId));
+    if (pendingLead) {
+      await sendTelegramMessage(
+        chatId,
+        `📞 <b>Please share a valid 10-digit mobile number</b> so our expert can assist you faster for:\n<b>${escapeHtml(pendingLead.actionLabel)}</b>\n\nExample: <code>8882332050</code>\n\nOr tap <b>Skip for now</b>.`,
+        { reply_markup: getContactShareKeyboard() }
+      );
       return;
     }
 
