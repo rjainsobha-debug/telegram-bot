@@ -812,6 +812,67 @@ function getWhatsAppClickUrl(actionLabel, mobile) {
   return `https://wa.me/918882332050?text=${text}`;
 }
 
+
+function extractIndianMobile(text) {
+  const raw = String(text || "").replace(/[^\d+]/g, "").trim();
+  if (!raw) return null;
+
+  let digits = raw;
+  if (digits.startsWith("+")) digits = digits.slice(1);
+  if (digits.startsWith("91") && digits.length === 12) digits = digits.slice(2);
+  if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
+
+  if (!/^[6-9]\d{9}$/.test(digits)) return null;
+  return digits;
+}
+
+async function handleManualPhoneInput(message) {
+  const chatId = message?.chat?.id;
+  if (!chatId) return false;
+
+  const pending = pendingLeadRequests.get(String(chatId));
+  if (!pending) return false;
+
+  const phone = extractIndianMobile(message?.text);
+  if (!phone) return false;
+
+  const actionLabel = pending?.actionLabel || "Bot lead";
+  const tgName = [message?.from?.first_name, message?.from?.last_name]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  await upsertBotUserFields(chatId, {
+    name: tgName || undefined,
+    mobile: phone || undefined,
+    is_lead: true,
+  });
+
+  await sendWhatsAppLeadAlert({
+    chatId,
+    name: tgName || undefined,
+    mobile: phone || undefined,
+    actionLabel: `${actionLabel} | Manual number shared`,
+  });
+
+  pendingLeadRequests.delete(String(chatId));
+
+  await sendTelegramMessage(
+    chatId,
+    `✅ <b>Thanks! We received your number</b>\n\n📱 <b>${escapeHtml(phone)}</b>\n\nOur expert will contact you shortly. You can also chat instantly on WhatsApp below.`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "💬 Chat on WhatsApp", url: getWhatsAppClickUrl(actionLabel, phone) }],
+          [{ text: "🤖 Open @Mfddelhibot", url: "https://t.me/Mfddelhibot" }],
+        ],
+      },
+    }
+  );
+
+  return true;
+}
+
 function getContactShareKeyboard() {
   return {
     keyboard: [
@@ -1735,6 +1796,9 @@ app.post(WEBHOOK_PATH, async (req, res) => {
     }
 
     if (!message.text) return;
+
+    const handledManualPhone = await handleManualPhoneInput(message);
+    if (handledManualPhone) return;
 
     await handleTextMessage(message.chat.id, message.text);
   } catch (err) {
