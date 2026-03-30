@@ -8,7 +8,7 @@
 // - /sips
 // - /register name | city | mobile | email
 // - Lead capture on message: YES
-// - WhatsApp alert via Twilio
+// - Telegram admin lead alert (Twilio removed)
 // - /cron/summary?token=...
 // - /cron/run-sips?token=...
 
@@ -29,6 +29,7 @@ const HOLDINGS_TABLE = process.env.HOLDINGS_TABLE || "holdings";
 const TRANSACTIONS_TABLE = process.env.TRANSACTIONS_TABLE || "transactions";
 const SIPS_TABLE = process.env.SIPS_TABLE || "sip_plans";
 const USERS_TABLE = process.env.USERS_TABLE || "bot_users";
+const ADMIN_TELEGRAM_CHAT_ID = process.env.ADMIN_TELEGRAM_CHAT_ID || "852911307";
 
 const USER_COL = process.env.USER_COL || "chat_id";
 const FUND_NAME_COL = process.env.FUND_NAME_COL || "fund_name";
@@ -41,10 +42,6 @@ const LAST_NAV_DATE_COL = process.env.LAST_NAV_DATE_COL || "last_nav_date";
 const CREATED_AT_COL = process.env.CREATED_AT_COL || "created_at";
 const UPDATED_AT_COL = process.env.UPDATED_AT_COL || "updated_at";
 
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const WHATSAPP_FROM = process.env.WHATSAPP_FROM;
-const WHATSAPP_TO = process.env.WHATSAPP_TO;
 
 if (!TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
 if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
@@ -453,7 +450,7 @@ async function editTelegramMessage(chatId, messageId, text, extra = {}) {
 async function sendAutoLeadAlert(chatId, actionLabel) {
   await markLead(chatId);
   const user = await getBotUser(chatId);
-  const result = await sendWhatsAppLeadAlert({
+  const result = await sendAdminLeadAlert({
     chatId,
     name: user?.name,
     city: user?.city,
@@ -848,7 +845,7 @@ async function handleManualPhoneInput(message) {
     is_lead: true,
   });
 
-  await sendWhatsAppLeadAlert({
+  await sendAdminLeadAlert({
     chatId,
     name: tgName || undefined,
     mobile: phone || undefined,
@@ -920,7 +917,7 @@ async function handleContactMessage(message) {
     is_lead: true,
   });
 
-  await sendWhatsAppLeadAlert({
+  await sendAdminLeadAlert({
     chatId,
     name: tgName || undefined,
     mobile: phone || undefined,
@@ -1199,60 +1196,57 @@ async function getPortfolioSnapshot(chatId) {
 }
 
 // =======================
-// WHATSAPP ALERT
+// TELEGRAM ADMIN ALERT
 // =======================
-async function sendWhatsAppLeadAlert({ chatId, name, city, mobile, email, actionLabel }) {
-  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !WHATSAPP_FROM || !WHATSAPP_TO) {
-    console.warn("WhatsApp alert skipped: missing Twilio/WhatsApp env vars");
+function getAdminChatIds() {
+  return String(ADMIN_TELEGRAM_CHAT_ID || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+async function sendAdminLeadAlert({ chatId, name, city, mobile, email, actionLabel }) {
+  const adminChatIds = getAdminChatIds();
+  if (!adminChatIds.length) {
+    console.warn("Admin lead alert skipped: missing ADMIN_TELEGRAM_CHAT_ID");
     return { ok: false, skipped: true };
   }
 
   const portfolio = await getPortfolioSnapshot(chatId);
   const sip = await getSipSnapshot(chatId);
   const leadTime = formatLeadTimestamp();
+  const userWhatsappUrl = getWhatsAppClickUrl(actionLabel || "Need help", mobile || "");
+  const tgProfile = `tg://user?id=${chatId}`;
 
   const body =
-    `🔥 New MF Lead\n\n` +
-    `Name: ${name || "Not provided"}\n` +
-    `City: ${city || "Not provided"}\n` +
-    `Mobile: ${mobile || "Not provided"}\n` +
-    `Email: ${email || "Not provided"}\n` +
-    `Chat ID: ${chatId}\n\n` +
+    `🔥 <b>New MF Lead</b>\n\n` +
+    `Name: <b>${escapeHtml(name || "Not provided")}</b>\n` +
+    `City: <b>${escapeHtml(city || "Not provided")}</b>\n` +
+    `Mobile: <b>${escapeHtml(mobile || "Not provided")}</b>\n` +
+    `Email: <b>${escapeHtml(email || "Not provided")}</b>\n` +
+    `Chat ID: <code>${chatId}</code>\n\n` +
     `Portfolio:\n` +
     `Invested: ${formatINR(portfolio.totalInvested)}\n` +
     `Current Value: ${formatINR(portfolio.totalCurrent)}\n` +
     `P/L: ${formatINR(portfolio.totalProfit)} (${portfolio.totalPct.toFixed(2)}%)\n` +
-    `Top Fund: ${portfolio.topFund?.fundName || "N/A"}\n\n` +
+    `Top Fund: ${escapeHtml(portfolio.topFund?.fundName || "N/A")}\n\n` +
     `SIPs: ${sip.count}\n` +
     `Monthly SIP: ${formatINR(sip.totalMonthly)}\n\n` +
-    `Action: ${actionLabel || "Portfolio review interest captured"}\n` +
-    `Time: ${leadTime}\n` +
-    `Call this lead now.`;
+    `Action: <b>${escapeHtml(actionLabel || "Portfolio review interest captured")}</b>\n` +
+    `Time: ${escapeHtml(leadTime)}\n\n` +
+    `<a href="${userWhatsappUrl}">Open WhatsApp chat</a> | <a href="${tgProfile}">Open Telegram user</a>`;
 
-  const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
-  const form = new URLSearchParams();
-  form.append("From", WHATSAPP_FROM);
-  form.append("To", WHATSAPP_TO);
-  form.append("Body", body);
-
-  const resp = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: form.toString(),
-    }
-  );
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    console.error("Twilio WhatsApp send failed:", data);
-    return { ok: false, error: data };
+  const results = [];
+  for (const adminChatId of adminChatIds) {
+    const result = await sendTelegramMessage(adminChatId, body);
+    results.push(result);
   }
-  return { ok: true, sid: data.sid };
+  const ok = results.some((r) => r?.ok);
+  if (!ok) {
+    console.error("Telegram admin lead alert failed:", results);
+    return { ok: false, error: results };
+  }
+  return { ok: true, sent_to: adminChatIds };
 }
 
 // =======================
