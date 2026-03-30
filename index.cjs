@@ -513,7 +513,6 @@ async function handleCallbackQuery(callbackQuery) {
 
   const label = quickLeadChoiceLabel(data);
   if (label) {
-    await sendAutoLeadAlert(chatId, label);
     await editTelegramMessage(
       chatId,
       messageId,
@@ -1557,6 +1556,35 @@ async function handleTextMessage(chatId, text) {
   const lower = normalized.toLowerCase();
 
   try {
+    const pendingLead = pendingLeadRequests.get(String(chatId));
+
+    // If we are already waiting for the user's number, do NOT restart the flow.
+    if (pendingLead) {
+      if (lower === "skip for now") {
+        const skipped = await handleSkipForNow(chatId);
+        if (skipped) return;
+      }
+
+      // Ignore menu taps while number capture is pending and gently ask again.
+      const quickLeadAction = quickLeadTextToAction(text);
+      if (quickLeadAction) {
+        await sendTelegramMessage(
+          chatId,
+          `📞 <b>Almost done</b>\n\nPlease share your mobile number so our expert can assist you faster for:\n<b>${escapeHtml(pendingLead.actionLabel)}</b>\n\nExample: <code>8882332050</code>\n\nOr tap <b>Skip for now</b>.`,
+          { reply_markup: getContactShareKeyboard() }
+        );
+        return;
+      }
+
+      // Any other text while pending should be treated as an invalid phone attempt.
+      await sendTelegramMessage(
+        chatId,
+        `📞 <b>Please share a valid 10-digit mobile number</b> so our expert can assist you faster for:\n<b>${escapeHtml(pendingLead.actionLabel)}</b>\n\nExample: <code>8882332050</code>\n\nOr tap <b>Skip for now</b>.`,
+        { reply_markup: getContactShareKeyboard() }
+      );
+      return;
+    }
+
     if (lower === "yes") {
       await sendAutoLeadAlert(chatId, "Replied YES for portfolio review");
       await sendTelegramMessage(
@@ -1567,14 +1595,7 @@ async function handleTextMessage(chatId, text) {
       return;
     }
 
-    const pendingLead = pendingLeadRequests.get(String(chatId));
-    if (pendingLead) {
-      if (lower === "skip for now") {
-        const skipped = await handleSkipForNow(chatId);
-        if (skipped) return;
-      }
-
-      const quickLeadAction = quickLeadTextToAction(text);
+    const quickLeadAction = quickLeadTextToAction(text);
     if (quickLeadAction) {
       if (quickLeadAction === "ql_main") {
         await sendTelegramMessage(
@@ -1636,11 +1657,7 @@ async function handleTextMessage(chatId, text) {
       if (label) {
         await sendTelegramMessage(
           chatId,
-          `✅ <b>Request captured</b>
-
-<b>${escapeHtml(label)}</b>
-
-Our expert will connect with you shortly.`,
+          `✅ <b>Request captured</b>\n\n<b>${escapeHtml(label)}</b>\n\nOur expert will connect with you shortly.`,
           {
             reply_markup: {
               ...getQuickLeadReplyKeyboard("main"),
@@ -1651,11 +1668,6 @@ Our expert will connect with you shortly.`,
         await promptForContact(chatId, label);
         return;
       }
-    }
-
-    if (lower === "skip for now") {
-      const skipped = await handleSkipForNow(chatId);
-      if (skipped) return;
     }
 
     if (lower === "/start") {
@@ -1787,14 +1799,6 @@ Our expert will connect with you shortly.`,
     }
 
     await sendTelegramMessage(
-        chatId,
-        `📞 <b>Please share a valid 10-digit mobile number</b> so our expert can assist you faster for:\n<b>${escapeHtml(pendingLead.actionLabel)}</b>\n\nExample: <code>8882332050</code>\n\nOr tap <b>Skip for now</b>.`,
-        { reply_markup: getContactShareKeyboard() }
-      );
-      return;
-    }
-
-    await sendTelegramMessage(
       chatId,
       `❓ Unknown command.\n\nUse <code>/help</code> to see all commands.`
     );
@@ -1806,6 +1810,7 @@ Our expert will connect with you shortly.`,
     );
   }
 }
+
 
 // =======================
 // ROUTES
