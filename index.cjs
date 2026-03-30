@@ -1567,7 +1567,14 @@ async function handleTextMessage(chatId, text) {
       return;
     }
 
-    const quickLeadAction = quickLeadTextToAction(text);
+    const pendingLead = pendingLeadRequests.get(String(chatId));
+    if (pendingLead) {
+      if (lower === "skip for now") {
+        const skipped = await handleSkipForNow(chatId);
+        if (skipped) return;
+      }
+
+      const quickLeadAction = quickLeadTextToAction(text);
     if (quickLeadAction) {
       if (quickLeadAction === "ql_main") {
         await sendTelegramMessage(
@@ -1779,9 +1786,7 @@ Our expert will connect with you shortly.`,
       return;
     }
 
-    const pendingLead = pendingLeadRequests.get(String(chatId));
-    if (pendingLead) {
-      await sendTelegramMessage(
+    await sendTelegramMessage(
         chatId,
         `📞 <b>Please share a valid 10-digit mobile number</b> so our expert can assist you faster for:\n<b>${escapeHtml(pendingLead.actionLabel)}</b>\n\nExample: <code>8882332050</code>\n\nOr tap <b>Skip for now</b>.`,
         { reply_markup: getContactShareKeyboard() }
