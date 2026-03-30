@@ -472,9 +472,9 @@ async function handleCallbackQuery(callbackQuery) {
   await answerCallbackQuery(callbackQueryId);
 
   if (data === "ql_main") {
-    await editTelegramMessage(
+    pendingLeadRequests.delete(String(chatId));
+    await sendTelegramMessage(
       chatId,
-      messageId,
       `Choose a quick lead option below:`,
       { reply_markup: { ...getQuickLeadReplyKeyboard("main"), inline_keyboard: getQuickLeadInlineKeyboard("main").inline_keyboard } }
     );
