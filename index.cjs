@@ -315,6 +315,86 @@ function getQuickLeadInlineKeyboard(menu = "main") {
   return { inline_keyboard: [] };
 }
 
+function getQuickLeadReplyKeyboard(menu = "main") {
+  if (menu === "main") {
+    return {
+      keyboard: [
+        [{ text: "📊 Quick Investment Check" }],
+        [{ text: "🚀 Start SIP" }],
+        [{ text: "💬 Get Free Advice" }],
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    };
+  }
+
+  if (menu === "investment") {
+    return {
+      keyboard: [
+        [{ text: "₹0-1 lakh" }, { text: "₹1-5 lakh" }],
+        [{ text: "₹5-20 lakh" }, { text: "₹20 lakh+" }],
+        [{ text: "⬅️ Back" }],
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    };
+  }
+
+  if (menu === "sip") {
+    return {
+      keyboard: [
+        [{ text: "₹2,000/month" }, { text: "₹5,000/month" }],
+        [{ text: "₹10,000/month" }, { text: "₹25,000+/month" }],
+        [{ text: "⬅️ Back" }],
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    };
+  }
+
+  if (menu === "advice") {
+    return {
+      keyboard: [
+        [{ text: "Portfolio Review" }, { text: "Tax Saving Help" }],
+        [{ text: "SIP Planning" }, { text: "Talk to Expert" }],
+        [{ text: "⬅️ Back" }],
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    };
+  }
+
+  return {
+    remove_keyboard: true,
+  };
+}
+
+function quickLeadTextToAction(text) {
+  const cleaned = String(text || "").trim();
+  const map = {
+    "📊 Quick Investment Check": "ql_investment",
+    "Quick Investment Check": "ql_investment",
+    "🚀 Start SIP": "ql_sip",
+    "Start SIP": "ql_sip",
+    "💬 Get Free Advice": "ql_advice",
+    "Get Free Advice": "ql_advice",
+    "₹0-1 lakh": "lead_inv_0_1",
+    "₹1-5 lakh": "lead_inv_1_5",
+    "₹5-20 lakh": "lead_inv_5_20",
+    "₹20 lakh+": "lead_inv_20_plus",
+    "₹2,000/month": "lead_sip_2000",
+    "₹5,000/month": "lead_sip_5000",
+    "₹10,000/month": "lead_sip_10000",
+    "₹25,000+/month": "lead_sip_25000_plus",
+    "Portfolio Review": "lead_adv_portfolio_review",
+    "Tax Saving Help": "lead_adv_tax_saving_help",
+    "SIP Planning": "lead_adv_sip_planning",
+    "Talk to Expert": "lead_adv_talk_to_expert",
+    "⬅️ Back": "ql_main",
+  };
+  return map[cleaned] || null;
+}
+
 function quickLeadChoiceLabel(data) {
   const map = {
     lead_inv_0_1: "Quick Investment Check: ₹0-1 lakh",
@@ -1277,6 +1357,85 @@ async function handleTextMessage(chatId, text) {
       return;
     }
 
+    const quickLeadAction = quickLeadTextToAction(text);
+    if (quickLeadAction) {
+      if (quickLeadAction === "ql_main") {
+        await sendTelegramMessage(
+          chatId,
+          `Choose a quick lead option below:`,
+          {
+            reply_markup: {
+              ...getQuickLeadReplyKeyboard("main"),
+              inline_keyboard: getQuickLeadInlineKeyboard("main").inline_keyboard,
+            },
+          }
+        );
+        return;
+      }
+
+      if (quickLeadAction === "ql_investment") {
+        await sendTelegramMessage(
+          chatId,
+          `Select your approximate mutual fund investment:`,
+          {
+            reply_markup: {
+              ...getQuickLeadReplyKeyboard("investment"),
+              inline_keyboard: getQuickLeadInlineKeyboard("investment").inline_keyboard,
+            },
+          }
+        );
+        return;
+      }
+
+      if (quickLeadAction === "ql_sip") {
+        await sendTelegramMessage(
+          chatId,
+          `Select the SIP amount you are considering:`,
+          {
+            reply_markup: {
+              ...getQuickLeadReplyKeyboard("sip"),
+              inline_keyboard: getQuickLeadInlineKeyboard("sip").inline_keyboard,
+            },
+          }
+        );
+        return;
+      }
+
+      if (quickLeadAction === "ql_advice") {
+        await sendTelegramMessage(
+          chatId,
+          `Choose what you want help with:`,
+          {
+            reply_markup: {
+              ...getQuickLeadReplyKeyboard("advice"),
+              inline_keyboard: getQuickLeadInlineKeyboard("advice").inline_keyboard,
+            },
+          }
+        );
+        return;
+      }
+
+      const label = quickLeadChoiceLabel(quickLeadAction);
+      if (label) {
+        await sendAutoLeadAlert(chatId, label);
+        await sendTelegramMessage(
+          chatId,
+          `✅ <b>Request captured</b>
+
+<b>${escapeHtml(label)}</b>
+
+Our expert will connect with you shortly.`,
+          {
+            reply_markup: {
+              ...getQuickLeadReplyKeyboard("main"),
+              inline_keyboard: getQuickLeadInlineKeyboard("main").inline_keyboard,
+            },
+          }
+        );
+        return;
+      }
+    }
+
     if (lower === "/start") {
       await sendTelegramMessage(
         chatId,
@@ -1292,7 +1451,12 @@ async function handleTextMessage(chatId, text) {
       await sendTelegramMessage(
         chatId,
         `Choose a quick lead option below:`,
-        { reply_markup: getQuickLeadInlineKeyboard("main") }
+        {
+          reply_markup: {
+            ...getQuickLeadReplyKeyboard("main"),
+            inline_keyboard: getQuickLeadInlineKeyboard("main").inline_keyboard,
+          },
+        }
       );
       return;
     }
